@@ -1,352 +1,230 @@
-// === Auto-generated preamble library stuff ===
+// === Preamble library stuff ===
 
-//========================================
-// Runtime code shared with compiler
-//========================================
+// Documentation for the public APIs defined in this file must be updated in:
+//    site/source/docs/api_reference/preamble.js.rst
+// A prebuilt local version of the documentation is available at:
+//    site/build/text/docs/api_reference/preamble.js.txt
+// You can also build docs locally as HTML or other formats in site/
+// An online HTML version (which may be of a different version of Emscripten)
+//    is up at http://kripken.github.io/emscripten-site/docs/api_reference/preamble.js.html
 
-{{RUNTIME}}
-
-#if SAFE_HEAP
-//========================================
-// Debugging tools - Heap
-//========================================
-var HEAP_WATCHED = [];
-var HEAP_HISTORY = [];
-function SAFE_HEAP_CLEAR(dest) {
-#if SAFE_HEAP_LOG
-  print('SAFE_HEAP clear: ' + dest);
+#if BENCHMARK
+Module.realPrint = out;
+out = err = function(){};
 #endif
-  HEAP_HISTORY[dest] = [];
-}
-var SAFE_HEAP_ERRORS = 0;
-var ACCEPTABLE_SAFE_HEAP_ERRORS = 0;
 
-function SAFE_HEAP_ACCESS(dest, type, store, ignore) {
-  //if (dest === A_NUMBER) print ([dest, type, store] + ' ' + new Error().stack); // Something like this may be useful, in debugging
-  if (type && type[type.length-1] == '*') type = 'i32'; // pointers are ints, for our purposes here
-  // Note that this will pass even with unions: You can store X, load X, then store Y and load Y.
-  // You cannot, however, do the nonportable act of store X and load Y!
-  if (store) {
-    HEAP_HISTORY[dest] = ignore ? null : type;
-  } else {
-#if USE_TYPED_ARRAYS == 0
-    if (!HEAP[dest] && HEAP[dest] !== 0 && HEAP[dest] !== false) { // false can be the result of a mathop comparator
-      throw('Warning: Reading an invalid value at ' + dest + ' :: ' + new Error().stack + '\n');
-    }
+{{{ makeModuleReceiveWithVar('wasmBinary') }}}
+{{{ makeModuleReceiveWithVar('noExitRuntime') }}}
+
+#if WASM != 2 && MAYBE_WASM2JS
+#if !WASM2JS
+if (Module['doWasm2JS']) {
 #endif
-    if (type === null) return;
-    var history = HEAP_HISTORY[dest];
-    if (history === null) return;
-    if (!ignore)
-      assert(history, 'Must have a history for a safe heap load! ' + dest + ':' + type); // Warning - bit fields in C structs cause loads+stores for each store, so
-                                                                                         //           they will show up here...
-//    assert((history && history[0]) /* || HEAP[dest] === 0 */, "Loading from where there was no store! " + dest + ',' + HEAP[dest] + ',' + type + ', \n\n' + new Error().stack + '\n');
-//    if (history[0].type !== type) {
-    if (history !== type && !ignore) {
-      print('Load-store consistency assumption failure! ' + dest);
-      print('\n');
-      print(JSON.stringify(history));
-      print('\n');
-      print('LOAD: ' + type + ', ' + new Error().stack);
-      print('\n');
-      SAFE_HEAP_ERRORS++;
-      assert(SAFE_HEAP_ERRORS <= ACCEPTABLE_SAFE_HEAP_ERRORS, 'Load-store consistency assumption failure!');
-    }
-  }
-}
-#if USE_TYPED_ARRAYS == 2
-var warned64 = false;
-function warn64() {
-  if (!warned64) {
-    __ATEXIT__.push({ func: function() {
-      print('Warning: using a 64-bit type with USE_TYPED_ARRAYS == 2. This is emulated as a 32-bit value, and will likely fail horribly.');
-    } });
-    warned64 = true;
-  }
+#include "wasm2js.js"
+#if !WASM2JS
 }
 #endif
-
-function SAFE_HEAP_STORE(dest, value, type, ignore) {
-#if SAFE_HEAP_LOG
-  print('SAFE_HEAP store: ' + [dest, type, value, ignore]);
 #endif
 
-  if (!ignore && !value && value !== 0 && value !== false && !isNaN(value)) { // false can be the result of a mathop comparator; NaN can be the result of a math function
-    throw('Warning: Writing an invalid value of ' + JSON.stringify(value) + ' at ' + dest + ' :: ' + new Error().stack + '\n');
-  }
-  SAFE_HEAP_ACCESS(dest, type, true, ignore);
-  if (dest in HEAP_WATCHED) {
-    print((new Error()).stack);
-    throw "Bad store!" + dest;
-  }
-#if USE_TYPED_ARRAYS == 1
-  if (type === null) {
-    IHEAP[dest] = value;
-    FHEAP[dest] = value;
-  } else if (type in Runtime.FLOAT_TYPES) {
-    FHEAP[dest] = value;
-  } else {
-    IHEAP[dest] = value;
-  }
+#if WASM == 1
+if (typeof WebAssembly !== 'object') {
+#if ASSERTIONS
+  abort('No WebAssembly support found. Build with -s WASM=0 to target JavaScript instead.');
 #else
-#if USE_TYPED_ARRAYS == 2
-  assert(type != 'null', 'typed arrays 2 with null type!');
-  if (type[type.length-1] === '*') type = 'i32'; // hardcoded pointers as 32-bit
-  switch(type) {
-    case 'i1': case 'i8': HEAP8[dest] = value; break;
-    case 'i16': assert(dest % 2 === 0, type + ' loads must be aligned'); HEAP16[dest>>1] = value; break;
-    case 'i32': assert(dest % 4 === 0, type + ' loads must be aligned'); HEAP32[dest>>2] = value; break;
-    case 'i64': assert(dest % 4 === 0, type + ' loads must be aligned'); warn64(); HEAP32[dest>>2] = value; break; // XXX store int64 as int32
-    case 'float': assert(dest % 4 === 0, type + ' loads must be aligned'); HEAPF32[dest>>2] = value; break;
-    case 'double': assert(dest % 4 === 0, type + ' loads must be aligned'); warn64(); HEAPF32[dest>>2] = value; break; // XXX store doubles as floats
-    default: throw 'weird type for typed array II: ' + type + new Error().stack;
-  }
-#else
-  HEAP[dest] = value;
-#endif
+  err('no native wasm support detected');
 #endif
 }
-
-function SAFE_HEAP_LOAD(dest, type, unsigned, ignore) {
-  SAFE_HEAP_ACCESS(dest, type, ignore);
-
-#if USE_TYPED_ARRAYS == 1
-  if (type in Runtime.FLOAT_TYPES) {
-#if SAFE_HEAP_LOG
-    print('SAFE_HEAP load: ' + [dest, type, FHEAP[dest], ignore]);
 #endif
-    return FHEAP[dest];
-  } else {
-#if SAFE_HEAP_LOG
-    print('SAFE_HEAP load: ' + [dest, type, IHEAP[dest], ignore]);
-#endif
-    return IHEAP[dest];
-  }
+
+#include "runtime_safe_heap.js"
+
+// Wasm globals
+
+var wasmMemory;
+
+// In fastcomp asm.js, we don't need a wasm Table at all.
+// In the wasm backend, we polyfill the WebAssembly object,
+// so this creates a (non-native-wasm) table for us.
+#if WASM_BACKEND || WASM
+var wasmTable = new WebAssembly.Table({
+  'initial': {{{ getQuoted('WASM_TABLE_SIZE') }}},
+#if !ALLOW_TABLE_GROWTH
+#if WASM_BACKEND
+  'maximum': {{{ getQuoted('WASM_TABLE_SIZE') }}} + {{{ RESERVED_FUNCTION_POINTERS }}},
 #else
-#if USE_TYPED_ARRAYS == 2
-#if SAFE_HEAP_LOG
-  var originalType = type;
+  'maximum': {{{ getQuoted('WASM_TABLE_SIZE') }}},
 #endif
-  var ret;
-  if (type[type.length-1] === '*') type = 'i32'; // hardcoded pointers as 32-bit
-  switch(type) {
-    case 'i1': case 'i8': {
-      ret = (unsigned ? HEAPU8 : HEAP8)[dest];
-      break;
-    }
-    case 'i16': {
-      assert(dest % 2 === 0, type + ' loads must be aligned');
-      ret = (unsigned ? HEAPU16 : HEAP16)[dest>>1];
-      break;
-    }
-    case 'i32': case 'i64': { // XXX store int64 as int32
-      assert(dest % 4 === 0, type + ' loads must be aligned');
-      if (type === 'i64') warn64();
-      ret = (unsigned ? HEAPU32 : HEAP32)[dest>>2];
-      break;
-    }
-    case 'float': case 'double': { // XXX store doubles as floats
-      assert(dest % 4 === 0, type + ' loads must be aligned');
-      if (type === 'double') warn64();
-      ret = HEAPF32[dest>>2];
-      break;
-    }
-    default: throw 'weird type for typed array II: ' + type;
-  }
-#if SAFE_HEAP_LOG
-  print('SAFE_HEAP load: ' + [dest, originalType, ret, unsigned, ignore]);
-#endif
-  return ret;
-#else
-#if SAFE_HEAP_LOG
-  print('SAFE_HEAP load: ' + [dest, type, HEAP[dest], ignore]);
-#endif
-  return HEAP[dest];
-#endif
-#endif
-}
+#endif // WASM_BACKEND
+  'element': 'anyfunc'
+});
+#endif // WASM_BACKEND || WASM
 
-function SAFE_HEAP_COPY_HISTORY(dest, src) {
-#if SAFE_HEAP_LOG
-  print('SAFE_HEAP copy: ' + [dest, src]);
-#endif
-  HEAP_HISTORY[dest] = HEAP_HISTORY[src];
-  SAFE_HEAP_ACCESS(dest, HEAP_HISTORY[dest] || null, true, false);
-}
-
-//==========================================
-#endif
-
-var CorrectionsMonitor = {
-#if AUTO_OPTIMIZE
-  MAX_ALLOWED: Infinity,
-#else
-  MAX_ALLOWED: 0, // XXX
-#endif
-  corrections: 0,
-  sigs: {},
-
-  note: function(type, succeed, sig) {
-    if (!succeed) {
-      this.corrections++;
-      if (this.corrections >= this.MAX_ALLOWED) abort('\n\nToo many corrections!');
-    }
-#if AUTO_OPTIMIZE
-    if (!sig)
-      sig = (new Error().stack).toString().split('\n')[2].split(':').slice(-1)[0]; // Spidermonkey-specific FIXME
-    sig = type + '|' + sig;
-    if (!this.sigs[sig]) {
-      //print('Correction: ' + sig);
-      this.sigs[sig] = [0, 0]; // fail, succeed
-    }
-    this.sigs[sig][succeed ? 1 : 0]++;
-#endif
-  },
-
-  print: function() {
-    var items = [];
-    for (var sig in this.sigs) {
-      items.push({
-        sig: sig,
-        fails: this.sigs[sig][0],
-        succeeds: this.sigs[sig][1],
-        total: this.sigs[sig][0] + this.sigs[sig][1]
-      });
-    }
-    items.sort(function(x, y) { return y.total - x.total; });
-    for (var i = 0; i < items.length; i++) {
-      var item = items[i];
-      print(item.sig + ' : ' + item.total + ' hits, %' + (Math.floor(100*item.fails/item.total)) + ' failures');
-    }
-  }
-};
-
-#if CORRECT_ROUNDINGS
-function cRound(x) {
-  return x >= 0 ? Math.floor(x) : Math.ceil(x);
-}
-#endif
-
-#if CHECK_OVERFLOWS
-//========================================
-// Debugging tools - Mathop overflows
-//========================================
-function CHECK_OVERFLOW(value, bits, ignore, sig) {
-  if (ignore) return value;
-  var twopbits = Math.pow(2, bits);
-  var twopbits1 = Math.pow(2, bits-1);
-  // For signedness issue here, see settings.js, CHECK_SIGNED_OVERFLOWS
-#if CHECK_SIGNED_OVERFLOWS
-  if (value === Infinity || value === -Infinity || value >= twopbits1 || value < -twopbits1) {
-    CorrectionsMonitor.note('SignedOverflow', 0, sig);
-    if (value === Infinity || value === -Infinity || Math.abs(value) >= twopbits) CorrectionsMonitor.note('Overflow');
-#else
-  if (value === Infinity || value === -Infinity || Math.abs(value) >= twopbits) {
-    CorrectionsMonitor.note('Overflow', 0, sig);
-#endif
-#if CORRECT_OVERFLOWS
-    // Fail on >32 bits - we warned at compile time
-    if (bits <= 32) {
-      value = value & (twopbits - 1);
-    }
-#endif
-  } else {
-#if CHECK_SIGNED_OVERFLOWS
-    CorrectionsMonitor.note('SignedOverflow', 1, sig);
-#endif
-    CorrectionsMonitor.note('Overflow', 1, sig);
-  }
-  return value;
-}
-#endif
-
-#if LABEL_DEBUG
-//========================================
-// Debugging tools - Code flow progress
-//========================================
-var INDENT = '';
-#endif
-
-#if EXECUTION_TIMEOUT
-//========================================
-// Debugging tools - Execution timeout
-//========================================
-var START_TIME = Date.now();
-#endif
+#if USE_PTHREADS
+// For sending to workers.
+var wasmModule;
+// Only workers actually use these field, but we refer to them from
+// library_pthread (which exists on all threads) so this definition is useful
+// to avoid accessing the global scope.
+var threadInfoStruct = 0;
+var selfThreadId = 0;
+#endif // USE_PTHREADS
 
 //========================================
 // Runtime essentials
 //========================================
 
-var __globalConstructor__ = function globalConstructor() {
-};
-
-var __THREW__ = false; // Used in checking for thrown exceptions.
-
-var __ATEXIT__ = [];
-
+// whether we are quitting the application. no code should run after this.
+// set in exit() and abort()
 var ABORT = false;
 
-var undef = 0;
+// set by exit() and abort().  Passed to 'onExit' handler.
+// NOTE: This is also used as the process return code code in shell environments
+// but only when noExitRuntime is false.
+var EXITSTATUS = 0;
 
-function abort(text) {
-  print(text + ':\n' + (new Error).stack);
-  ABORT = true;
-  throw "Assertion: " + text;
-}
-
+/** @type {function(*, string=)} */
 function assert(condition, text) {
   if (!condition) {
     abort('Assertion failed: ' + text);
   }
 }
 
-// Sets a value in memory in a dynamic way at run-time. Uses the
-// type data. This is the same as makeSetValue, except that
-// makeSetValue is done at compile-time and generates the needed
-// code then, whereas this function picks the right code at
-// run-time.
+// Returns the C function with a specified identifier (for C++, you need to do manual name mangling)
+function getCFunc(ident) {
+  var func = Module['_' + ident]; // closure exported function
+  assert(func, 'Cannot call unknown function ' + ident + ', make sure it is exported');
+  return func;
+}
 
-function setValue(ptr, value, type) {
-  if (type[type.length-1] === '*') type = 'i32'; // pointers are 32-bit
-  switch(type) {
-    case 'i1': {{{ makeSetValue('ptr', '0', 'value', 'i1') }}}; break;
-    case 'i8': {{{ makeSetValue('ptr', '0', 'value', 'i8') }}}; break;
-    case 'i16': {{{ makeSetValue('ptr', '0', 'value', 'i16') }}}; break;
-    case 'i32': {{{ makeSetValue('ptr', '0', 'value', 'i32') }}}; break;
-    case 'i64': {{{ makeSetValue('ptr', '0', 'value', 'i64') }}}; break;
-    case 'float': {{{ makeSetValue('ptr', '0', 'value', 'float') }}}; break;
-    case 'double': {{{ makeSetValue('ptr', '0', 'value', 'double') }}}; break;
-    default: abort('invalid type for setValue: ' + type);
+// C calling interface.
+function ccall(ident, returnType, argTypes, args, opts) {
+  // For fast lookup of conversion functions
+  var toC = {
+    'string': function(str) {
+      var ret = 0;
+      if (str !== null && str !== undefined && str !== 0) { // null string
+        // at most 4 bytes per UTF-8 code point, +1 for the trailing '\0'
+        var len = (str.length << 2) + 1;
+        ret = stackAlloc(len);
+        stringToUTF8(str, ret, len);
+      }
+      return ret;
+    },
+    'array': function(arr) {
+      var ret = stackAlloc(arr.length);
+      writeArrayToMemory(arr, ret);
+      return ret;
+    }
+  };
+
+  function convertReturnValue(ret) {
+    if (returnType === 'string') return UTF8ToString(ret);
+    if (returnType === 'boolean') return Boolean(ret);
+    return ret;
+  }
+
+  var func = getCFunc(ident);
+  var cArgs = [];
+  var stack = 0;
+#if ASSERTIONS
+  assert(returnType !== 'array', 'Return type should not be "array".');
+#endif
+  if (args) {
+    for (var i = 0; i < args.length; i++) {
+      var converter = toC[argTypes[i]];
+      if (converter) {
+        if (stack === 0) stack = stackSave();
+        cArgs[i] = converter(args[i]);
+      } else {
+        cArgs[i] = args[i];
+      }
+    }
+  }
+  var ret = func.apply(null, cArgs);
+#if EMTERPRETIFY_ASYNC
+  if (typeof EmterpreterAsync === 'object' && EmterpreterAsync.state) {
+#if ASSERTIONS
+    assert(opts && opts.async, 'The call to ' + ident + ' is running asynchronously. If this was intended, add the async option to the ccall/cwrap call.');
+    assert(!EmterpreterAsync.restartFunc, 'Cannot have multiple async ccalls in flight at once');
+#endif
+    return new Promise(function(resolve) {
+      EmterpreterAsync.restartFunc = func;
+      EmterpreterAsync.asyncFinalizers.push(function(ret) {
+        if (stack !== 0) stackRestore(stack);
+        resolve(convertReturnValue(ret));
+      });
+    });
+  }
+#endif
+#if ASYNCIFY && WASM_BACKEND
+  var asyncMode = opts && opts.async;
+  var runningAsync = typeof Asyncify === 'object' && Asyncify.currData;
+  var prevRunningAsync = typeof Asyncify === 'object' && Asyncify.asyncFinalizers.length > 0; 
+#if ASSERTIONS
+  assert(!asyncMode || !prevRunningAsync, 'Cannot have multiple async ccalls in flight at once');
+#endif
+  // Check if we started an async operation just now.
+  if (runningAsync && !prevRunningAsync) {
+    // If so, the WASM function ran asynchronous and unwound its stack.
+    // We need to return a Promise that resolves the return value
+    // once the stack is rewound and execution finishes.
+#if ASSERTIONS
+    assert(asyncMode, 'The call to ' + ident + ' is running asynchronously. If this was intended, add the async option to the ccall/cwrap call.');
+#endif
+    return new Promise(function(resolve) {
+      Asyncify.asyncFinalizers.push(function(ret) {
+        if (stack !== 0) stackRestore(stack);
+        resolve(convertReturnValue(ret));
+      });
+    });
+  }
+#endif
+
+  ret = convertReturnValue(ret);
+  if (stack !== 0) stackRestore(stack);
+#if EMTERPRETIFY_ASYNC || (ASYNCIFY && WASM_BACKEND)
+  // If this is an async ccall, ensure we return a promise
+  if (opts && opts.async) return Promise.resolve(ret);
+#endif
+  return ret;
+}
+
+function cwrap(ident, returnType, argTypes, opts) {
+#if !ASSERTIONS
+  argTypes = argTypes || [];
+  // When the function takes numbers and returns a number, we can just return
+  // the original function
+  var numericArgs = argTypes.every(function(type){ return type === 'number'});
+  var numericRet = returnType !== 'string';
+  if (numericRet && numericArgs && !opts) {
+    return getCFunc(ident);
+  }
+#endif
+  return function() {
+    return ccall(ident, returnType, argTypes, arguments, opts);
   }
 }
-Module['setValue'] = setValue;
-
-// Parallel to setValue.
-
-function getValue(ptr, type) {
-  if (type[type.length-1] === '*') type = 'i32'; // pointers are 32-bit
-  switch(type) {
-    case 'i1': return {{{ makeGetValue('ptr', '0', 'i1') }}};
-    case 'i8': return {{{ makeGetValue('ptr', '0', 'i8') }}};
-    case 'i16': return {{{ makeGetValue('ptr', '0', 'i16') }}};
-    case 'i32': return {{{ makeGetValue('ptr', '0', 'i32') }}};
-    case 'i64': return {{{ makeGetValue('ptr', '0', 'i64') }}};
-    case 'float': return {{{ makeGetValue('ptr', '0', 'float') }}};
-    case 'double': return {{{ makeGetValue('ptr', '0', 'double') }}};
-    default: abort('invalid type for setValue: ' + type);
-  }
-  return null;
-}
-Module['getValue'] = getValue;
-
-// Allocates memory for some data and initializes it properly.
 
 var ALLOC_NORMAL = 0; // Tries to use _malloc()
 var ALLOC_STACK = 1; // Lives for the duration of the current function call
-var ALLOC_STATIC = 2; // Cannot be freed
+var ALLOC_DYNAMIC = 2; // Cannot be freed except through sbrk
+var ALLOC_NONE = 3; // Do not allocate
 
-function allocate(slab, types, allocator) {
+// allocate(): This is for internal use. You can use it yourself as well, but the interface
+//             is a little tricky (see docs right below). The reason is that it is optimized
+//             for multiple syntaxes to save space in generated code. So you should
+//             normally not use allocate(), and instead allocate memory using _malloc(),
+//             initialize it with setValue(), and so forth.
+// @slab: An array of data, or a number. If a number, then the size of the block to allocate,
+//        in *bytes* (note that this is sometimes confusing: the next parameter does not
+//        affect this!)
+// @types: Either an array of types, one for each byte (or 0 if no type at that position),
+//         or a single type which is used for the entire block. This only matters if there
+//         is initial data - if @slab is a number, then this does not matter at all and is
+//         ignored.
+// @allocator: How to allocate memory, see ALLOC_*
+/** @type {function((TypedArray|Array<number>|number), string, number, number=)} */
+function allocate(slab, types, allocator, ptr) {
   var zeroinit, size;
   if (typeof slab === 'number') {
     zeroinit = true;
@@ -356,17 +234,48 @@ function allocate(slab, types, allocator) {
     size = slab.length;
   }
 
-  var ret = [_malloc, Runtime.stackAlloc, Runtime.staticAlloc][allocator === undefined ? ALLOC_STATIC : allocator](Math.max(size, 1));
-
   var singleType = typeof types === 'string' ? types : null;
 
-  var i = 0, type;
-  while (i < size) {
-    var curr = zeroinit ? 0 : slab[i];
+  var ret;
+  if (allocator == ALLOC_NONE) {
+    ret = ptr;
+  } else {
+    ret = [_malloc,
+#if DECLARE_ASM_MODULE_EXPORTS    
+    stackAlloc,
+#else
+    typeof stackAlloc !== 'undefined' ? stackAlloc : null,
+#endif
+    dynamicAlloc][allocator](Math.max(size, singleType ? 1 : types.length));
+  }
 
-    if (typeof curr === 'function') {
-      curr = Runtime.getFunctionIndex(curr);
+  if (zeroinit) {
+    var stop;
+    ptr = ret;
+    assert((ret & 3) == 0);
+    stop = ret + (size & ~3);
+    for (; ptr < stop; ptr += 4) {
+      {{{ makeSetValue('ptr', '0', '0', 'i32', null, true) }}};
     }
+    stop = ret + size;
+    while (ptr < stop) {
+      {{{ makeSetValue('ptr++', '0', '0', 'i8', null, true) }}};
+    }
+    return ret;
+  }
+
+  if (singleType === 'i8') {
+    if (slab.subarray || slab.slice) {
+      HEAPU8.set(/** @type {!Uint8Array} */ (slab), ret);
+    } else {
+      HEAPU8.set(new Uint8Array(slab), ret);
+    }
+    return ret;
+  }
+
+  var i = 0, type, typeSize, previousType;
+  while (i < size) {
+    var curr = slab[i];
 
     type = singleType || types[i];
     if (type === 0) {
@@ -377,236 +286,835 @@ function allocate(slab, types, allocator) {
     assert(type, 'Must know what type to store in allocate!');
 #endif
 
+    if (type == 'i64') type = 'i32'; // special case: we have one i32 here, and one i32 later
+
     setValue(ret+i, curr, type);
-    i += Runtime.getNativeTypeSize(type);
+
+    // no need to look up size unless type changes, so cache it
+    if (previousType !== type) {
+      typeSize = getNativeTypeSize(type);
+      previousType = type;
+    }
+    i += typeSize;
   }
 
   return ret;
 }
-Module['allocate'] = allocate;
 
-function Pointer_stringify(ptr) {
-  var ret = "";
-  var i = 0;
-  var t;
-  var nullByte = String.fromCharCode(0);
-  while (1) {
-    t = String.fromCharCode({{{ makeGetValue('ptr', 'i', 'i8', 0, 1) }}});
-    if (t == nullByte) { break; } else {}
-    ret += t;
-    i += 1;
-  }
-  return ret;
+// Allocate memory during any stage of startup - static memory early on, dynamic memory later, malloc when ready
+function getMemory(size) {
+  if (!runtimeInitialized) return dynamicAlloc(size);
+  return _malloc(size);
 }
-Module['Pointer_stringify'] = Pointer_stringify;
 
-function Array_stringify(array) {
-  var ret = "";
-  for (var i = 0; i < array.length; i++) {
-    ret += String.fromCharCode(array[i]);
-  }
-  return ret;
-}
-Module['Array_stringify'] = Array_stringify;
+#include "runtime_strings.js"
+#include "runtime_strings_extra.js"
 
 // Memory management
 
-var PAGE_SIZE = 4096;
-function alignMemoryPage(x) {
-  return Math.ceil(x/PAGE_SIZE)*PAGE_SIZE;
-}
+var PAGE_SIZE = {{{ POSIX_PAGE_SIZE }}};
+var WASM_PAGE_SIZE = {{{ WASM_PAGE_SIZE }}};
+var ASMJS_PAGE_SIZE = {{{ ASMJS_PAGE_SIZE }}};
 
-var HEAP;
-#if USE_TYPED_ARRAYS == 1
-var IHEAP, FHEAP;
-#endif
-#if USE_TYPED_ARRAYS == 2
-var HEAP8, HEAPU8, HEAP16, HEAPU16, HEAP32, HEAPU32, HEAPF32;
-#endif
-
-var STACK_ROOT, STACKTOP, STACK_MAX;
-var STATICTOP;
-
-var HAS_TYPED_ARRAYS = false;
-var TOTAL_MEMORY = Module['TOTAL_MEMORY'] || {{{ TOTAL_MEMORY }}};
-var FAST_MEMORY = Module['FAST_MEMORY'] || {{{ FAST_MEMORY }}};
-
-// Initialize the runtime's memory
-#if USE_TYPED_ARRAYS
-HAS_TYPED_ARRAYS = false;
-try {
-  HAS_TYPED_ARRAYS = !!Int32Array && !!Float64Array && !!(new Int32Array(1)['subarray']); // check for full engine support (use string 'subarray' to avoid closure compiler confusion)
-} catch(e) {}
-
-if (HAS_TYPED_ARRAYS) {
-#if USE_TYPED_ARRAYS == 1
-  HEAP = IHEAP = new Int32Array(TOTAL_MEMORY);
-  FHEAP = new Float64Array(TOTAL_MEMORY);
-#endif
-#if USE_TYPED_ARRAYS == 2
-  var buffer = new ArrayBuffer(TOTAL_MEMORY);
-  HEAP8 = new Int8Array(buffer);
-  HEAP16 = new Int16Array(buffer);
-  HEAP32 = new Int32Array(buffer);
-  HEAPU8 = new Uint8Array(buffer);
-  HEAPU16 = new Uint16Array(buffer);
-  HEAPU32 = new Uint32Array(buffer);
-  HEAPF32 = new Float32Array(buffer);
-
-  // Endianness check (note: assumes compiler arch was little-endian)
-  HEAP32[0] = 255;
-  assert(HEAPU8[0] === 255 && HEAPU8[3] === 0, 'Typed arrays 2 must be run on a little-endian system');
-#endif
-} else
-#endif
-{
-  // Make sure that our HEAP is implemented as a flat array.
-  HEAP = new Array(TOTAL_MEMORY);
-  for (var i = 0; i < FAST_MEMORY; i++) {
-    HEAP[i] = 0; // XXX We do *not* use {{| makeSetValue(0, 'i', 0, 'null') |}} here, since this is done just to optimize runtime speed
+function alignUp(x, multiple) {
+  if (x % multiple > 0) {
+    x += multiple - (x % multiple);
   }
-#if USE_TYPED_ARRAYS == 1
-  IHEAP = FHEAP = HEAP;
-#endif
-#if USE_TYPED_ARRAYS == 2
-  abort('Cannot fallback to non-typed array case in USE_TYPED_ARRAYS == 2: Code is too specialized');
-#endif
+  return x;
 }
 
-var base = intArrayFromString('(null)'); // So printing %s of NULL gives '(null)'
-                                         // Also this ensures we leave 0 as an invalid address, 'NULL'
-for (var i = 0; i < base.length; i++) {
-  {{{ makeSetValue(0, 'i', 'base[i]', 'i8') }}}
+var HEAP,
+/** @type {ArrayBuffer} */
+  buffer,
+/** @type {Int8Array} */
+  HEAP8,
+/** @type {Uint8Array} */
+  HEAPU8,
+/** @type {Int16Array} */
+  HEAP16,
+/** @type {Uint16Array} */
+  HEAPU16,
+/** @type {Int32Array} */
+  HEAP32,
+/** @type {Uint32Array} */
+  HEAPU32,
+/** @type {Float32Array} */
+  HEAPF32,
+/** @type {Float64Array} */
+  HEAPF64;
+
+function updateGlobalBufferAndViews(buf) {
+  buffer = buf;
+  Module['HEAP8'] = HEAP8 = new Int8Array(buf);
+  Module['HEAP16'] = HEAP16 = new Int16Array(buf);
+  Module['HEAP32'] = HEAP32 = new Int32Array(buf);
+  Module['HEAPU8'] = HEAPU8 = new Uint8Array(buf);
+  Module['HEAPU16'] = HEAPU16 = new Uint16Array(buf);
+  Module['HEAPU32'] = HEAPU32 = new Uint32Array(buf);
+  Module['HEAPF32'] = HEAPF32 = new Float32Array(buf);
+  Module['HEAPF64'] = HEAPF64 = new Float64Array(buf);
 }
 
-Module['HEAP'] = HEAP;
-#if USE_TYPED_ARRAYS == 1
-Module['IHEAP'] = IHEAP;
-Module['FHEAP'] = FHEAP;
-#endif
-#if USE_TYPED_ARRAYS == 2
-Module['HEAP8'] = HEAP8;
-Module['HEAP16'] = HEAP16;
-Module['HEAP32'] = HEAP32;
-Module['HEAPU8'] = HEAPU8;
-Module['HEAPU16'] = HEAPU16;
-Module['HEAPU32'] = HEAPU32;
-Module['HEAPF32'] = HEAPF32;
+var STATIC_BASE = {{{ GLOBAL_BASE }}},
+    STACK_BASE = {{{ getQuoted('STACK_BASE') }}},
+    STACKTOP = STACK_BASE,
+    STACK_MAX = {{{ getQuoted('STACK_MAX') }}},
+    DYNAMIC_BASE = {{{ getQuoted('DYNAMIC_BASE') }}},
+    DYNAMICTOP_PTR = {{{ DYNAMICTOP_PTR }}};
+
+#if ASSERTIONS
+assert(STACK_BASE % 16 === 0, 'stack must start aligned');
+assert(DYNAMIC_BASE % 16 === 0, 'heap must start aligned');
 #endif
 
-STACK_ROOT = STACKTOP = alignMemoryPage(10);
-var TOTAL_STACK = 1024*1024; // XXX: Changing this value can lead to bad perf on v8!
-STACK_MAX = STACK_ROOT + TOTAL_STACK;
+#if USE_PTHREADS
+if (ENVIRONMENT_IS_PTHREAD) {
 
-STATICTOP = alignMemoryPage(STACK_MAX);
+  // At the 'load' stage of Worker startup, we are just loading this script
+  // but not ready to run yet. At 'run' we receive proper values for the stack
+  // etc. and can launch a pthread. Set some fake values there meanwhile to
+  // catch bugs, then set the real values in establishStackSpaceInJsModule later.
+#if ASSERTIONS || STACK_OVERFLOW_CHECK >= 2
+  STACK_MAX = STACKTOP = STACK_MAX = 0x7FFFFFFF;
+#endif
+  // TODO DYNAMIC_BASE = Module['DYNAMIC_BASE'];
+  // TODO DYNAMICTOP_PTR = Module['DYNAMICTOP_PTR'];
+}
+#endif
 
-function __shutdownRuntime__() {
-  while(__ATEXIT__.length > 0) {
-    var atexit = __ATEXIT__.pop();
-    var func = atexit.func;
+#if EMTERPRETIFY
+function abortStackOverflowEmterpreter() {
+  abort("Emterpreter stack overflow! Decrease the recursion level or increase EMT_STACK_MAX in tools/emterpretify.py (current value " + EMT_STACK_MAX + ").");
+}
+#endif
+
+var TOTAL_STACK = {{{ TOTAL_STACK }}};
+#if ASSERTIONS
+if (Module['TOTAL_STACK']) assert(TOTAL_STACK === Module['TOTAL_STACK'], 'the stack size can no longer be determined at runtime')
+#endif
+#if MAIN_MODULE && !WASM
+// JS side modules use this value to decide their stack size.
+Module['TOTAL_STACK'] = TOTAL_STACK;
+#endif
+
+{{{ makeModuleReceiveWithVar('INITIAL_TOTAL_MEMORY', 'TOTAL_MEMORY', TOTAL_MEMORY) }}}
+
+#if ASSERTIONS
+assert(INITIAL_TOTAL_MEMORY >= TOTAL_STACK, 'TOTAL_MEMORY should be larger than TOTAL_STACK, was ' + INITIAL_TOTAL_MEMORY + '! (TOTAL_STACK=' + TOTAL_STACK + ')');
+
+// check for full engine support (use string 'subarray' to avoid closure compiler confusion)
+assert(typeof Int32Array !== 'undefined' && typeof Float64Array !== 'undefined' && Int32Array.prototype.subarray !== undefined && Int32Array.prototype.set !== undefined,
+       'JS engine does not provide full typed array support');
+#endif
+
+#if IN_TEST_HARNESS
+
+// Test runs in browsers should always be free from uncaught exceptions. If an uncaught exception is thrown, we fail browser test execution in the REPORT_RESULT() macro to output an error value.
+if (ENVIRONMENT_IS_WEB) {
+  window.addEventListener('error', function(e) {
+    if (e.message.indexOf('unwind') != -1) return;
+    console.error('Page threw an exception ' + e);
+    Module['pageThrewException'] = true;
+  });
+}
+
+#if USE_PTHREADS
+if (typeof SharedArrayBuffer === 'undefined' || typeof Atomics === 'undefined') {
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', 'http://localhost:8888/report_result?skipped:%20SharedArrayBuffer%20is%20not%20supported!');
+  xhr.send();
+  setTimeout(function() { window.close() }, 2000);
+}
+#endif
+#endif
+
+#include "runtime_sab_polyfill.js"
+
+// In standalone mode, the wasm creates the memory, and the user can't provide it.
+#if STANDALONE_WASM
+#if ASSERTIONS
+assert(!Module['wasmMemory']);
+#endif // ASSERTIONS
+#else // !STANDALONE_WASM
+// In non-standalone/normal mode, we create the memory here.
+#include "runtime_init_memory.js"
+#endif // !STANDALONE_WASM
+
+#include "runtime_stack_check.js"
+#include "runtime_assertions.js"
+
+function callRuntimeCallbacks(callbacks) {
+  while(callbacks.length > 0) {
+    var callback = callbacks.shift();
+    if (typeof callback == 'function') {
+      callback();
+      continue;
+    }
+    var func = callback.func;
     if (typeof func === 'number') {
-      func = FUNCTION_TABLE[func];
+      if (callback.arg === undefined) {
+        Module['dynCall_v'](func);
+      } else {
+        Module['dynCall_vi'](func, callback.arg);
+      }
+    } else {
+      func(callback.arg === undefined ? null : callback.arg);
     }
-    func(atexit.arg === undefined ? null : atexit.arg);
   }
-
-  // allow browser to GC, set heaps to null?
-
-  // Print summary of correction activity
-  CorrectionsMonitor.print();
 }
 
+var __ATPRERUN__  = []; // functions called before the runtime is initialized
+var __ATINIT__    = []; // functions called during startup
+var __ATMAIN__    = []; // functions called when main() is to be run
+var __ATEXIT__    = []; // functions called during shutdown
+var __ATPOSTRUN__ = []; // functions called after the main() is called
 
-// Copies a list of num items on the HEAP into a
-// a normal JavaScript array of numbers
-function Array_copy(ptr, num) {
-  // TODO: In the SAFE_HEAP case, do some reading here, for debugging purposes - currently this is an 'unnoticed read'.
-#if USE_TYPED_ARRAYS == 1
-  if (HAS_TYPED_ARRAYS) {
-    return Array.prototype.slice.call(IHEAP.subarray(ptr, ptr+num)); // Make a normal array out of the typed 'view'
-                                                                     // Consider making a typed array here, for speed?
-  } else {
-    return IHEAP.slice(ptr, ptr+num);
+var runtimeInitialized = false;
+var runtimeExited = false;
+
+#if USE_PTHREADS
+if (ENVIRONMENT_IS_PTHREAD) runtimeInitialized = true; // The runtime is hosted in the main thread, and bits shared to pthreads via SharedArrayBuffer. No need to init again in pthread.
+#endif
+
+function preRun() {
+#if USE_PTHREADS
+  if (ENVIRONMENT_IS_PTHREAD) return; // PThreads reuse the runtime from the main thread.
+#endif
+
+#if expectToReceiveOnModule('preRun')
+  if (Module['preRun']) {
+    if (typeof Module['preRun'] == 'function') Module['preRun'] = [Module['preRun']];
+    while (Module['preRun'].length) {
+      addOnPreRun(Module['preRun'].shift());
+    }
   }
 #endif
-#if USE_TYPED_ARRAYS == 2
-  if (HAS_TYPED_ARRAYS) {
-    return Array.prototype.slice.call(HEAP8.subarray(ptr, ptr+num)); // Make a normal array out of the typed 'view'
-                                                                     // Consider making a typed array here, for speed?
-  } else {
-    return HEAP8.slice(ptr, ptr+num);
-  }
+
+  callRuntimeCallbacks(__ATPRERUN__);
+}
+
+function initRuntime() {
+#if STACK_OVERFLOW_CHECK
+  checkStackCookie();
 #endif
-  return HEAP.slice(ptr, ptr+num);
-}
-Module['Array_copy'] = Array_copy;
-
-function String_len(ptr) {
-  var i = 0;
-  while ({{{ makeGetValue('ptr', 'i', 'i8') }}}) i++; // Note: should be |!= 0|, technically. But this helps catch bugs with undefineds
-  return i;
-}
-Module['String_len'] = String_len;
-
-// Copies a C-style string, terminated by a zero, from the HEAP into
-// a normal JavaScript array of numbers
-function String_copy(ptr, addZero) {
-  var len = String_len(ptr);
-  if (addZero) len++;
-  var ret = Array_copy(ptr, len);
-  if (addZero) ret[len-1] = 0;
-  return ret;
-}
-Module['String_copy'] = String_copy;
-
-// Tools
-
-if (typeof print === 'undefined') {
-  this['print'] = console.log; // we are on the web
-}
-
-// This processes a JS string into a C-line array of numbers, 0-terminated.
-// For LLVM-originating strings, see parser.js:parseLLVMString function
-function intArrayFromString(stringy, dontAddNull) {
-  var ret = [];
-  var t;
-  var i = 0;
-  while (i < stringy.length) {
-    var chr = stringy.charCodeAt(i);
-    if (chr > 0xFF) {
 #if ASSERTIONS
-        assert(false, 'Character code ' + chr + ' (' + stringy[i] + ')  at offset ' + i + ' not in 0x00-0xFF.');
+  assert(!runtimeInitialized);
 #endif
-      chr &= 0xFF;
-    }
-    ret.push(chr);
-    i = i + 1;
-  }
-  if (!dontAddNull) {
-    ret.push(0);
-  }
-  return ret;
+  runtimeInitialized = true;
+  {{{ getQuoted('ATINITS') }}}
+  callRuntimeCallbacks(__ATINIT__);
 }
-Module['intArrayFromString'] = intArrayFromString;
 
-function intArrayToString(array) {
-  var ret = [];
-  for (var i = 0; i < array.length; i++) {
-    var chr = array[i];
-    if (chr > 0xFF) {
-#if ASSERTIONS
-        assert(false, 'Character code ' + chr + ' (' + String.fromCharCode(chr) + ')  at offset ' + i + ' not in 0x00-0xFF.');
+function preMain() {
+#if STACK_OVERFLOW_CHECK
+  checkStackCookie();
 #endif
-      chr &= 0xFF;
-    }
-    ret.push(String.fromCharCode(chr));
-  }
-  return ret.join('');
+#if USE_PTHREADS
+  if (ENVIRONMENT_IS_PTHREAD) return; // PThreads reuse the runtime from the main thread.
+#endif
+  {{{ getQuoted('ATMAINS') }}}
+  callRuntimeCallbacks(__ATMAIN__);
 }
-Module['intArrayToString'] = intArrayToString;
+
+function exitRuntime() {
+#if STACK_OVERFLOW_CHECK
+  checkStackCookie();
+#endif
+#if USE_PTHREADS
+  if (ENVIRONMENT_IS_PTHREAD) return; // PThreads reuse the runtime from the main thread.
+#endif
+#if EXIT_RUNTIME
+  callRuntimeCallbacks(__ATEXIT__);
+  {{{ getQuoted('ATEXITS') }}}
+#endif
+  runtimeExited = true;
+}
+
+function postRun() {
+#if STACK_OVERFLOW_CHECK
+  checkStackCookie();
+#endif
+#if USE_PTHREADS
+  if (ENVIRONMENT_IS_PTHREAD) return; // PThreads reuse the runtime from the main thread.
+#endif
+
+#if expectToReceiveOnModule('postRun')
+  if (Module['postRun']) {
+    if (typeof Module['postRun'] == 'function') Module['postRun'] = [Module['postRun']];
+    while (Module['postRun'].length) {
+      addOnPostRun(Module['postRun'].shift());
+    }
+  }
+#endif
+
+  callRuntimeCallbacks(__ATPOSTRUN__);
+}
+
+function addOnPreRun(cb) {
+  __ATPRERUN__.unshift(cb);
+}
+
+function addOnInit(cb) {
+  __ATINIT__.unshift(cb);
+}
+
+function addOnPreMain(cb) {
+  __ATMAIN__.unshift(cb);
+}
+
+function addOnExit(cb) {
+#if EXIT_RUNTIME
+  __ATEXIT__.unshift(cb);
+#endif
+}
+
+function addOnPostRun(cb) {
+  __ATPOSTRUN__.unshift(cb);
+}
 
 {{{ unSign }}}
 {{{ reSign }}}
 
-// === Body ===
+#include "runtime_math.js"
 
+// A counter of dependencies for calling run(). If we need to
+// do asynchronous work before running, increment this and
+// decrement it. Incrementing must happen in a place like
+// Module.preRun (used by emcc to add file preloading).
+// Note that you can add dependencies in preRun, even though
+// it happens right before run - run will be postponed until
+// the dependencies are met.
+var runDependencies = 0;
+var runDependencyWatcher = null;
+var dependenciesFulfilled = null; // overridden to take different actions when all run dependencies are fulfilled
+#if ASSERTIONS
+var runDependencyTracking = {};
+#endif
+
+function getUniqueRunDependency(id) {
+#if ASSERTIONS
+  var orig = id;
+  while (1) {
+    if (!runDependencyTracking[id]) return id;
+    id = orig + Math.random();
+  }
+#endif
+  return id;
+}
+
+function addRunDependency(id) {
+#if USE_PTHREADS
+  // We should never get here in pthreads (could no-op this out if called in pthreads, but that might indicate a bug in caller side,
+  // so good to be very explicit)
+  assert(!ENVIRONMENT_IS_PTHREAD, "addRunDependency cannot be used in a pthread worker");
+#endif
+  runDependencies++;
+
+#if expectToReceiveOnModule('monitorRunDependencies')
+  if (Module['monitorRunDependencies']) {
+    Module['monitorRunDependencies'](runDependencies);
+  }
+#endif
+
+#if ASSERTIONS
+  if (id) {
+    assert(!runDependencyTracking[id]);
+    runDependencyTracking[id] = 1;
+    if (runDependencyWatcher === null && typeof setInterval !== 'undefined') {
+      // Check for missing dependencies every few seconds
+      runDependencyWatcher = setInterval(function() {
+        if (ABORT) {
+          clearInterval(runDependencyWatcher);
+          runDependencyWatcher = null;
+          return;
+        }
+        var shown = false;
+        for (var dep in runDependencyTracking) {
+          if (!shown) {
+            shown = true;
+            err('still waiting on run dependencies:');
+          }
+          err('dependency: ' + dep);
+        }
+        if (shown) {
+          err('(end of list)');
+        }
+      }, 10000);
+    }
+  } else {
+    err('warning: run dependency added without ID');
+  }
+#endif
+}
+
+function removeRunDependency(id) {
+  runDependencies--;
+
+#if expectToReceiveOnModule('monitorRunDependencies')
+  if (Module['monitorRunDependencies']) {
+    Module['monitorRunDependencies'](runDependencies);
+  }
+#endif
+
+#if ASSERTIONS
+  if (id) {
+    assert(runDependencyTracking[id]);
+    delete runDependencyTracking[id];
+  } else {
+    err('warning: run dependency removed without ID');
+  }
+#endif
+  if (runDependencies == 0) {
+    if (runDependencyWatcher !== null) {
+      clearInterval(runDependencyWatcher);
+      runDependencyWatcher = null;
+    }
+    if (dependenciesFulfilled) {
+      var callback = dependenciesFulfilled;
+      dependenciesFulfilled = null;
+      callback(); // can add another dependenciesFulfilled
+    }
+  }
+}
+
+Module["preloadedImages"] = {}; // maps url to image data
+Module["preloadedAudios"] = {}; // maps url to audio data
+#if WASM && MAIN_MODULE
+Module["preloadedWasm"] = {}; // maps url to wasm instance exports
+#endif
+
+#if EMTERPRETIFY_ASYNC && ASSERTIONS
+var abortDecorators = [];
+#endif
+
+function abort(what) {
+#if expectToReceiveOnModule('onAbort')
+  if (Module['onAbort']) {
+    Module['onAbort'](what);
+  }
+#endif
+
+#if USE_PTHREADS
+  if (ENVIRONMENT_IS_PTHREAD) console.error('Pthread aborting at ' + new Error().stack);
+#endif
+  what += '';
+  out(what);
+  err(what);
+
+  ABORT = true;
+  EXITSTATUS = 1;
+
+#if ASSERTIONS == 0
+  what = 'abort(' + what + '). Build with -s ASSERTIONS=1 for more info.';
+#else
+  var output = 'abort(' + what + ') at ' + stackTrace();
+#if EMTERPRETIFY_ASYNC
+  abortDecorators.forEach(function(decorator) {
+    output = decorator(output, what);
+  });
+#endif
+  what = output;
+#endif // ASSERTIONS
+
+  // Throw a wasm runtime error, because a JS error might be seen as a foreign
+  // exception, which means we'd run destructors on it. We need the error to
+  // simply make the program stop.
+#if WASM
+  throw new WebAssembly.RuntimeError(what);
+#else
+  throw what;
+#endif
+}
+
+#if RELOCATABLE
+{{{
+(function() {
+  // add in RUNTIME_LINKED_LIBS, if provided
+  if (RUNTIME_LINKED_LIBS.length > 0) {
+    return "if (!Module['dynamicLibraries']) Module['dynamicLibraries'] = [];\n" +
+           "Module['dynamicLibraries'] = " + JSON.stringify(RUNTIME_LINKED_LIBS) + ".concat(Module['dynamicLibraries']);\n";
+  }
+  return '';
+})()
+}}}
+
+addOnPreRun(function() {
+  function loadDynamicLibraries(libs) {
+    if (libs) {
+      libs.forEach(function(lib) {
+        // libraries linked to main never go away
+        loadDynamicLibrary(lib, {global: true, nodelete: true});
+      });
+    }
+  }
+  // if we can load dynamic libraries synchronously, do so, otherwise, preload
+#if WASM
+  if (Module['dynamicLibraries'] && Module['dynamicLibraries'].length > 0 && !readBinary) {
+    // we can't read binary data synchronously, so preload
+    addRunDependency('preload_dynamicLibraries');
+    Promise.all(Module['dynamicLibraries'].map(function(lib) {
+      return loadDynamicLibrary(lib, {loadAsync: true, global: true, nodelete: true});
+    })).then(function() {
+      // we got them all, wonderful
+      removeRunDependency('preload_dynamicLibraries');
+    });
+    return;
+  }
+#endif
+  loadDynamicLibraries(Module['dynamicLibraries']);
+});
+
+#if ASSERTIONS
+function lookupSymbol(ptr) { // for a pointer, print out all symbols that resolve to it
+  var ret = [];
+  for (var i in Module) {
+    if (Module[i] === ptr) ret.push(i);
+  }
+  print(ptr + ' is ' + ret);
+}
+#endif
+#endif
+
+var memoryInitializer = null;
+
+#if MEMORYPROFILER
+#include "memoryprofiler.js"
+#endif
+
+#if PTHREAD_POOL_SIZE > 0 && PTHREAD_POOL_DELAY_LOAD != 1
+// To work around https://bugzilla.mozilla.org/show_bug.cgi?id=1049079, warm up a worker pool before starting up the application.
+if (!ENVIRONMENT_IS_PTHREAD) addOnPreRun(function() { if (typeof SharedArrayBuffer !== 'undefined') { addRunDependency('pthreads'); PThread.allocateUnusedWorkers({{{PTHREAD_POOL_SIZE}}}, function() { removeRunDependency('pthreads'); }); }});
+#endif
+
+#if ASSERTIONS && !('$FS' in addedLibraryItems) && !ASMFS
+// show errors on likely calls to FS when it was not included
+var FS = {
+  error: function() {
+    abort('Filesystem support (FS) was not included. The problem is that you are using files from JS, but files were not used from C/C++, so filesystem support was not auto-included. You can force-include filesystem support with  -s FORCE_FILESYSTEM=1');
+  },
+  init: function() { FS.error() },
+  createDataFile: function() { FS.error() },
+  createPreloadedFile: function() { FS.error() },
+  createLazyFile: function() { FS.error() },
+  open: function() { FS.error() },
+  mkdev: function() { FS.error() },
+  registerDevice: function() { FS.error() },
+  analyzePath: function() { FS.error() },
+  loadFilesFromDB: function() { FS.error() },
+
+  ErrnoError: function ErrnoError() { FS.error() },
+};
+Module['FS_createDataFile'] = FS.createDataFile;
+Module['FS_createPreloadedFile'] = FS.createPreloadedFile;
+#endif
+
+#if CYBERDWARF
+var cyberDWARFFile = '{{{ BUNDLED_CD_DEBUG_FILE }}}';
+#endif
+
+#include "URIUtils.js"
+
+#if WASM
+var wasmBinaryFile = '{{{ WASM_BINARY_FILE }}}';
+if (!isDataURI(wasmBinaryFile)) {
+  wasmBinaryFile = locateFile(wasmBinaryFile);
+}
+
+function getBinary() {
+  try {
+    if (wasmBinary) {
+      return new Uint8Array(wasmBinary);
+    }
+
+#if SUPPORT_BASE64_EMBEDDING
+    var binary = tryParseAsDataURI(wasmBinaryFile);
+    if (binary) {
+      return binary;
+    }
+#endif
+    if (readBinary) {
+      return readBinary(wasmBinaryFile);
+    } else {
+#if WASM_ASYNC_COMPILATION
+      throw "both async and sync fetching of the wasm failed";
+#else
+      throw "sync fetching of the wasm failed: you can preload it to Module['wasmBinary'] manually, or emcc.py will do that for you when generating HTML (but not JS)";
+#endif
+    }
+  }
+  catch (err) {
+    abort(err);
+  }
+}
+
+function getBinaryPromise() {
+  // if we don't have the binary yet, and have the Fetch api, use that
+  // in some environments, like Electron's render process, Fetch api may be present, but have a different context than expected, let's only use it on the Web
+  if (!wasmBinary && (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) && typeof fetch === 'function') {
+    return fetch(wasmBinaryFile, { credentials: 'same-origin' }).then(function(response) {
+      if (!response['ok']) {
+        throw "failed to load wasm binary file at '" + wasmBinaryFile + "'";
+      }
+      return response['arrayBuffer']();
+    }).catch(function () {
+      return getBinary();
+    });
+  }
+  // Otherwise, getBinary should be able to get it synchronously
+  return new Promise(function(resolve, reject) {
+    resolve(getBinary());
+  });
+}
+
+#if LOAD_SOURCE_MAP
+var wasmSourceMap;
+#include "source_map_support.js"
+#endif
+
+#if USE_OFFSET_CONVERTER
+var wasmOffsetConverter;
+#include "wasm_offset_converter.js"
+#endif
+
+// Create the wasm instance.
+// Receives the wasm imports, returns the exports.
+function createWasm() {
+  // prepare imports
+  var info = {
+#if MINIFY_WASM_IMPORTED_MODULES
+    'a': asmLibraryArg,
+#else // MINIFY_WASM_IMPORTED_MODULES
+    'env': asmLibraryArg,
+    '{{{ WASI_MODULE_NAME }}}': asmLibraryArg
+#endif // MINIFY_WASM_IMPORTED_MODULES
+#if WASM_BACKEND == 0
+    ,
+    'global': {
+      'NaN': NaN,
+      'Infinity': Infinity
+    },
+    'global.Math': Math,
+    'asm2wasm': asm2wasmImports
+#endif
+  };
+  // Load the wasm module and create an instance of using native support in the JS engine.
+  // handle a generated wasm instance, receiving its exports and
+  // performing other necessary setup
+  function receiveInstance(instance, module) {
+    var exports = instance.exports;
+#if RELOCATABLE
+    exports = relocateExports(exports, GLOBAL_BASE, 0);
+#endif
+#if WASM_BACKEND && ASYNCIFY
+    exports = Asyncify.instrumentWasmExports(exports);
+#endif
+    Module['asm'] = exports;
+#if STANDALONE_WASM
+    // In pure wasm mode the memory is created in the wasm (not imported), and
+    // then exported.
+    // TODO: do not create a Memory earlier in JS
+    wasmMemory = exports['memory'];
+    updateGlobalBufferAndViews(wasmMemory.buffer);
+#if ASSERTIONS
+    writeStackCookie();
+#endif
+#endif
+#if USE_PTHREADS
+    // Keep a reference to the compiled module so we can post it to the workers.
+    wasmModule = module;
+    // Instantiation is synchronous in pthreads and we assert on run dependencies.
+    if (!ENVIRONMENT_IS_PTHREAD) removeRunDependency('wasm-instantiate');
+#else
+    removeRunDependency('wasm-instantiate');
+#endif
+  }
+   // we can't run yet (except in a pthread, where we have a custom sync instantiator)
+  {{{ runOnMainThread("addRunDependency('wasm-instantiate');") }}}
+
+#if LOAD_SOURCE_MAP
+  {{{ runOnMainThread("addRunDependency('source-map');") }}}
+
+  function receiveSourceMapJSON(sourceMap) {
+    wasmSourceMap = new WasmSourceMap(sourceMap);
+    {{{ runOnMainThread("removeRunDependency('source-map');") }}}
+  }
+#endif
+
+#if ASSERTIONS
+  // Async compilation can be confusing when an error on the page overwrites Module
+  // (for example, if the order of elements is wrong, and the one defining Module is
+  // later), so we save Module and check it later.
+  var trueModule = Module;
+#endif
+  function receiveInstantiatedSource(output) {
+    // 'output' is a WebAssemblyInstantiatedSource object which has both the module and instance.
+    // receiveInstance() will swap in the exports (to Module.asm) so they can be called
+#if ASSERTIONS
+    assert(Module === trueModule, 'the Module object should not be replaced during async compilation - perhaps the order of HTML elements is wrong?');
+    trueModule = null;
+#endif
+#if USE_PTHREADS
+    receiveInstance(output['instance'], output['module']);
+#else
+      // TODO: Due to Closure regression https://github.com/google/closure-compiler/issues/3193, the above line no longer optimizes out down to the following line.
+      // When the regression is fixed, can restore the above USE_PTHREADS-enabled path.
+    receiveInstance(output['instance']);
+#endif
+  }
+
+#if USE_OFFSET_CONVERTER
+  {{{ runOnMainThread("addRunDependency('offset-converter');") }}}
+#endif
+
+  function instantiateArrayBuffer(receiver) {
+    return getBinaryPromise().then(function(binary) {
+#if USE_OFFSET_CONVERTER
+      var result = WebAssembly.instantiate(binary, info);
+      result.then(function (instance) {
+        wasmOffsetConverter = new WasmOffsetConverter(binary, instance.module);
+        {{{ runOnMainThread("removeRunDependency('offset-converter');") }}}
+      });
+      return result;
+#else // USE_OFFSET_CONVERTER
+      return WebAssembly.instantiate(binary, info);
+#endif // USE_OFFSET_CONVERTER
+    }).then(receiver, function(reason) {
+      err('failed to asynchronously prepare wasm: ' + reason);
+      abort(reason);
+    });
+  }
+
+  // Prefer streaming instantiation if available.
+#if WASM_ASYNC_COMPILATION
+  function instantiateAsync() {
+    if (!wasmBinary &&
+        typeof WebAssembly.instantiateStreaming === 'function' &&
+        !isDataURI(wasmBinaryFile) &&
+        typeof fetch === 'function') {
+      fetch(wasmBinaryFile, { credentials: 'same-origin' }).then(function (response) {
+        var result = WebAssembly.instantiateStreaming(response, info);
+#if USE_OFFSET_CONVERTER
+        // This doesn't actually do another request, it only copies the Response object.
+        // Copying lets us consume it independently of WebAssembly.instantiateStreaming.
+        Promise.all([response.clone().arrayBuffer(), result]).then(function (results) {
+          wasmOffsetConverter = new WasmOffsetConverter(new Uint8Array(results[0]), results[1].module);
+          {{{ runOnMainThread("removeRunDependency('offset-converter');") }}}
+        });
+#endif
+        return result.then(receiveInstantiatedSource, function(reason) {
+            // We expect the most common failure cause to be a bad MIME type for the binary,
+            // in which case falling back to ArrayBuffer instantiation should work.
+            err('wasm streaming compile failed: ' + reason);
+            err('falling back to ArrayBuffer instantiation');
+            instantiateArrayBuffer(receiveInstantiatedSource);
+          });
+      });
+    } else {
+      return instantiateArrayBuffer(receiveInstantiatedSource);
+    }
+  }
+#else
+  function instantiateSync() {
+    var instance;
+    var module;
+    var binary;
+    try {
+      binary = getBinary();
+#if NODE_CODE_CACHING
+      if (ENVIRONMENT_HAS_NODE) {
+        var v8 = require('v8');
+        // Include the V8 version in the cache name, so that we don't try to
+        // load cached code from another version, which fails silently (it seems
+        // to load ok, but we do actually recompile the binary every time).
+        var cachedCodeFile = '{{{ WASM_BINARY_FILE }}}.' + v8.cachedDataVersionTag() + '.cached';
+        cachedCodeFile = locateFile(cachedCodeFile);
+        var hasCached = nodeFS.existsSync(cachedCodeFile);
+        if (hasCached) {
+#if RUNTIME_LOGGING
+          err('NODE_CODE_CACHING: loading module');
+#endif
+          try {
+            module = v8.deserialize(nodeFS.readFileSync(cachedCodeFile));
+          } catch (e) {
+            err('NODE_CODE_CACHING: failed to deserialize, bad cache file?');
+            // Save the new compiled code when we have it.
+            hasCached = false;
+          }
+err(module);
+        }
+      }
+      if (!module) {
+        module = new WebAssembly.Module(binary);
+      }
+      if (ENVIRONMENT_HAS_NODE) {
+        if (!hasCached) {
+#if RUNTIME_LOGGING
+          err('NODE_CODE_CACHING: saving module');
+#endif
+          nodeFS.writeFileSync(cachedCodeFile, v8.serialize(module));
+        }
+      }
+#else // NODE_CODE_CACHING
+      module = new WebAssembly.Module(binary);
+#endif // NODE_CODE_CACHING
+      instance = new WebAssembly.Instance(module, info);
+#if USE_OFFSET_CONVERTER
+      wasmOffsetConverter = new WasmOffsetConverter(binary, module);
+      {{{ runOnMainThread("removeRunDependency('offset-converter');") }}}
+#endif
+    } catch (e) {
+      var str = e.toString();
+      err('failed to compile wasm module: ' + str);
+      if (str.indexOf('imported Memory') >= 0 ||
+          str.indexOf('memory import') >= 0) {
+        err('Memory size incompatibility issues may be due to changing TOTAL_MEMORY at runtime to something too large. Use ALLOW_MEMORY_GROWTH to allow any size memory (and also make sure not to set TOTAL_MEMORY at runtime to something smaller than it was at compile time).');
+      }
+      throw e;
+    }
+#if LOAD_SOURCE_MAP
+    receiveSourceMapJSON(getSourceMap());
+#endif
+    receiveInstance(instance, module);
+  }
+#endif
+  // User shell pages can write their own Module.instantiateWasm = function(imports, successCallback) callback
+  // to manually instantiate the Wasm module themselves. This allows pages to run the instantiation parallel
+  // to any other async startup actions they are performing.
+  if (Module['instantiateWasm']) {
+    try {
+      var exports = Module['instantiateWasm'](info, receiveInstance);
+#if WASM_BACKEND && ASYNCIFY
+      exports = Asyncify.instrumentWasmExports(exports);
+#endif
+      return exports;
+    } catch(e) {
+      err('Module.instantiateWasm callback failed with error: ' + e);
+      return false;
+    }
+  }
+
+#if WASM_ASYNC_COMPILATION
+#if RUNTIME_LOGGING
+  err('asynchronously preparing wasm');
+#endif
+  instantiateAsync();
+#if LOAD_SOURCE_MAP
+  getSourceMapPromise().then(receiveSourceMapJSON);
+#endif
+  return {}; // no exports yet; we'll fill them in later
+#else
+  instantiateSync();
+  return Module['asm']; // exports were assigned here
+#endif
+}
+#endif
+
+#if WASM && !WASM_BACKEND // fastcomp wasm support: create an asm.js-like funciton
+Module['asm'] = createWasm;
+#endif
+
+// Globals used by JS i64 conversions
+var tempDouble;
+var tempI64;
+
+// === Body ===

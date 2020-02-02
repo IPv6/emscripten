@@ -1,14 +1,18 @@
+// Copyright 2010 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 // sphere flake bvh raytracer (c) 2005, thierry berger-perrin <tbptbp@gmail.com>
 // this code is released under the GNU Public License.
 // Emscripten changes: stdlib.h, some printf stuff, SIZE
 
 #include <cmath>       // see http://ompf.org/ray/sphereflake/
 #include <iostream>    // compile with ie g++ -O2 -ffast-math sphereflake.cc
+#include <stdio.h>
 #include <stdlib.h>
 
 //#include "emscripten.h"
-
-static int outputLeft = 550; // limit output, so we do not benchmark speed of printing
 
 #define GIMME_SHADOWS  // usage: ./sphereflake [lvl=6] >pix.ppm
 
@@ -113,24 +117,19 @@ static void trace_rgss(const int width,const int height) {
 	}
 	v_t scan(0,w-1,std::max(w,h)); /*scan line*/
 	for(int i=height;i;--i) {
+    int lineMean = 0;
 		for(int j=width;j;--j) {
 			double g=0;
 			for(int idx=0;idx < ss_sqr;++idx){ /*AA*/
 				ray.d=(scan+rgss[idx]).norm();
 				g+=ray_trace(pool,ray); /*trace*/
 			}
-      if (outputLeft) {
-  		  std::cout << int(scale*g)<< " ";
-        outputLeft--;
-      }
+  		lineMean += int(scale*g);
 			scan.x+=1; /*next pixel*/
 		}
+    printf("%d : %d\n", i, lineMean/width);
 		scan.x=0;scan.y-=1; /*next line*/
 	}
-  if (outputLeft) {
-    std::cout << "\n"; // XXX Emscripten: std::endl crashes...
-    outputLeft--;
-  }
 }
 	
 struct basis_t{ /* bogus and compact, exactly what we need */
@@ -184,7 +183,7 @@ int main(int argc,char*argv[]){
 	pool=new node_t[count];  /* raw */
 	end=pool+count;
 	create(pool,lvl,count,v_t(0,0,0),v_t(+.25,+1,-.5).norm(),1.); /* cooked */
-	std::cout << "P2\n" << size << " " << size << "\n" << size << "\n";
+	printf("P2\n%d %d\n%d\n", size, size, size); // std::cout << "P2\n" << size << " " << size << "\n" << size << "\n";
 	trace_rgss(size, size); /* served */
 	return 0;
 }

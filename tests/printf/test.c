@@ -1,3 +1,10 @@
+/*
+ * Copyright 2011 The Emscripten Authors.  All rights reserved.
+ * Emscripten is available under two separate licenses, the MIT license and the
+ * University of Illinois/NCSA Open Source License.  Both these licenses can be
+ * found in the LICENSE file.
+ */
+
 #include <stdio.h>
 #include <math.h>
 
@@ -8,10 +15,15 @@ int main() {
   printf("\n");
   printf("Characters: %c %c\n", 'a', 65);
   printf("Decimals: %d %ld %lld %d\n", 1977, 650000L, 12LL, 4);
-  printf("Preceding with blanks: %10d\n", 1977);
-  printf("Preceding with zeros: %010d\n", 1977);
+  printf("Preceding with blanks: %10d %10d\n", 1977, -1977);
+  printf("Preceding with zeros: %010d %010d\n", 1977, -1977);
+  printf("Force sign: %+d %+d %+6d %+6d\n", 1977, -1977, 1977, -1977);
+  printf("Force sign or space: % d % d % 6d % 6d\n", 1977, -1977, 1977, -1977);
+  printf("Sign overrides space: % +d % +d % +6d % +6d\n", 1977, -1977, 1977, -1977);
   printf("Some different radixes: %d %x %o %#x %#o\n", 100, 100, 100, 100, 100);
-  printf("floats: %4.2f %+.0e %E\n", 3.1416, 3.1416, 3.1416);
+  printf("floats: %4.2f %+.0e %E %08.2f\n", 3.1416, 3.1416, 3.1416, 3.1416);
+  printf("negative floats: %4.2f %+.0e %E %08.2f\n", -3.1416, -3.1416, -3.1416, -3.1416);
+  printf("Force sign or space: % .2f % .2f % 6.2f % 6.2f\n", 3.1416, -3.1416, 3.1416, -3.1416);
   printf("Width trick: %*d\n", 5, 10);
   printf("%s %%\n", "A string");
   printf("Null string: %7s\n", NULL);
@@ -28,9 +40,8 @@ int main() {
   printf("%-010.2f\n", NAN);
   printf("%10.f\n", INFINITY);
   printf("%-10.f\n", -INFINITY);
-  printf("in%3.5valid\n", 0);
-  printf("%qd\n", 123ll);
-  printf("%Id\n", 456);
+  printf("--rest--\n");
+  printf("in%%3.5valid\n", 0);
   printf("%.f\n", 0.0f);
   printf("%.0f\n", 0.0f);
   printf("%.1f\n", 0.0f);
@@ -7956,14 +7967,13 @@ int main() {
   printf("%-15s: %0#1o\n", "%0#1o", 8127534);
   printf("%-15s: %0#2o\n", "%0#2o", 8127534);
   printf("%-15s: %0#5o\n", "%0#5o", 8127534);
-  printf("%-15s: %0#10o\n", "%0#10o", 8127534);
-  printf("%-15s: %0#30o\n", "%0#30o", 8127534);
   printf("%-15s: %#0o\n", "%#0o", 8127534);
   printf("%-15s: %#01o\n", "%#01o", 8127534);
   printf("%-15s: %#02o\n", "%#02o", 8127534);
   printf("%-15s: %#05o\n", "%#05o", 8127534);
-  printf("%-15s: %#010o\n", "%#010o", 8127534);
-  printf("%-15s: %#030o\n", "%#030o", 8127534);
+  printf("%-15s: %010o\n", "%010o", 8127534);
+  printf("%-15s: %030o\n", "%030o", 8127534);
+  printf("-break--\n");
   printf("%-15s: %-s\n", "%-s", "test");
   printf("%-15s: %-.s\n", "%-.s", "test");
   printf("%-15s: %-.0s\n", "%-.0s", "test");
@@ -8040,13 +8050,11 @@ int main() {
   printf("%x\n", 0x0123456789ABCDEll);
   printf("%lx\n", 0x0123456789ABCDEll);
   printf("%llx\n", 0x0123456789ABCDEll);
-  printf("%Lx\n", 0x0123456789ABCDEll);
+  printf("%llx\n", 0x0123456789ABCDEll);
   printf("\n");
   printf("%zx\n", 0x0123456789ABCDEll);
   printf("%jx\n", 0x0123456789ABCDEll);
   printf("%tx\n", 0x0123456789ABCDEll);
-  printf("%qx\n", 0x0123456789ABCDEll);
-  printf("%Ix\n", 0x0123456789ABCDEll);
   printf("\n");
   printf("%hhd\n", 0x789ABCDE);
   printf("%hd\n", 0x789ABCDE);
@@ -8063,13 +8071,11 @@ int main() {
   printf("%d\n", 0x0123456789ABCDEll);
   printf("%ld\n", 0x0123456789ABCDEll);
   printf("%lld\n", 0x0123456789ABCDEll);
-  printf("%Ld\n", 0x0123456789ABCDEll);
+  printf("%lld\n", 0x0123456789ABCDEll);
   printf("\n");
   printf("%zd\n", 0x0123456789ABCDEll);
   printf("%jd\n", 0x0123456789ABCDEll);
   printf("%td\n", 0x0123456789ABCDEll);
-  printf("%qd\n", 0x0123456789ABCDEll);
-  printf("%Id\n", 0x0123456789ABCDEll);
   printf("\n");
   printf("%hhu\n", 0x789ABCDE);
   printf("%hu\n", 0x789ABCDE);
@@ -8086,13 +8092,11 @@ int main() {
   printf("%u\n", 0x0123456789ABCDEll);
   printf("%lu\n", 0x0123456789ABCDEll);
   printf("%llu\n", 0x0123456789ABCDEll);
-  printf("%Lu\n", 0x0123456789ABCDEll);
+  printf("%llu\n", 0x0123456789ABCDEll);
   printf("\n");
   printf("%zu\n", 0x0123456789ABCDEll);
   printf("%ju\n", 0x0123456789ABCDEll);
   printf("%tu\n", 0x0123456789ABCDEll);
-  printf("%qu\n", 0x0123456789ABCDEll);
-  printf("%Iu\n", 0x0123456789ABCDEll);
   printf("\n");
   printf("%hhx\n", -0x789ABCDE);
   printf("%hx\n", -0x789ABCDE);
@@ -8109,13 +8113,11 @@ int main() {
   printf("%x\n", -0x0123456789ABCDEll);
   printf("%lx\n", -0x0123456789ABCDEll);
   printf("%llx\n", -0x0123456789ABCDEll);
-  printf("%Lx\n", -0x0123456789ABCDEll);
+  printf("%llx\n", -0x0123456789ABCDEll);
   printf("\n");
   printf("%zx\n", -0x0123456789ABCDEll);
   printf("%jx\n", -0x0123456789ABCDEll);
   printf("%tx\n", -0x0123456789ABCDEll);
-  printf("%qx\n", -0x0123456789ABCDEll);
-  printf("%Ix\n", -0x0123456789ABCDEll);
   printf("\n");
   printf("%hhd\n", -0x789ABCDE);
   printf("%hd\n", -0x789ABCDE);
@@ -8132,13 +8134,11 @@ int main() {
   printf("%d\n", -0x0123456789ABCDEll);
   printf("%ld\n", -0x0123456789ABCDEll);
   printf("%lld\n", -0x0123456789ABCDEll);
-  printf("%Ld\n", -0x0123456789ABCDEll);
+  printf("%lld\n", -0x0123456789ABCDEll);
   printf("\n");
   printf("%zd\n", -0x0123456789ABCDEll);
   printf("%jd\n", -0x0123456789ABCDEll);
   printf("%td\n", -0x0123456789ABCDEll);
-  printf("%qd\n", -0x0123456789ABCDEll);
-  printf("%Id\n", -0x0123456789ABCDEll);
   printf("\n");
   printf("%hhu\n", -0x789ABCDE);
   printf("%hu\n", -0x789ABCDE);
@@ -8155,31 +8155,21 @@ int main() {
   printf("%u\n", -0x0123456789ABCDEll);
   printf("%lu\n", -0x0123456789ABCDEll);
   printf("%llu\n", -0x0123456789ABCDEll);
-  printf("%Lu\n", -0x0123456789ABCDEll);
+  printf("%llu\n", -0x0123456789ABCDEll);
   printf("\n");
-  printf("%zu\n", -0x0123456789ABCDEll);
-  printf("%ju\n", -0x0123456789ABCDEll);
-  printf("%tu\n", -0x0123456789ABCDEll);
-  printf("%qu\n", -0x0123456789ABCDEll);
-  printf("%Iu\n", -0x0123456789ABCDEll);
+  printf("z %zu\n", -0x0123456789ABCDEll);
+  printf("j %ju\n", -0x0123456789ABCDEll);
+  printf("t %tu\n", -0x0123456789ABCDEll);
   printf("\n");
-  printf("%hhf\n", 1234567.890123456789);
-  printf("%hf\n", 1234567.890123456789);
   printf("%f\n", 1234567.890123456789);
   printf("%lf\n", 1234567.890123456789);
   printf("\n");
-  printf("%hhf\n", -1234567.890123456789);
-  printf("%hf\n", -1234567.890123456789);
   printf("%f\n", -1234567.890123456789);
   printf("%lf\n", -1234567.890123456789);
   printf("\n");
-  printf("%hhf\n", 1234567.890123456789f);
-  printf("%hf\n", 1234567.890123456789f);
   printf("%f\n", 1234567.890123456789f);
   printf("%lf\n", 1234567.890123456789f);
   printf("\n");
-  printf("%hhf\n", -1234567.890123456789f);
-  printf("%hf\n", -1234567.890123456789f);
   printf("%f\n", -1234567.890123456789f);
   printf("%lf\n", -1234567.890123456789f);
   printf("\n");
@@ -8279,5 +8269,9 @@ int main() {
   printf("%hhx\n", -0xFF);
   printf("%hx\n", -0xFFFF);
   printf("%x\n", -0xFFFFFFFF);
+  printf("\n");
+  printf("%*.*E\n", 10, -1, 12345.6789123);
+  printf("%*.*E\n", 10, -313, 12345.6789123);
+  printf("no_new_line");
   return 0;
 }

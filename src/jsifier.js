@@ -1,917 +1,566 @@
+// Copyright 2010 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
+//"use strict";
+
 // Convert analyzed data to javascript. Everything has already been calculated
 // before this stage, which just does the final conversion to JavaScript.
 
-// Main function
-function JSify(data, functionsOnly, givenFunctions, givenGlobalVariables) {
+// Handy sets
+
+var STRUCT_LIST = set('struct', 'list');
+
+var addedLibraryItems = {};
+var asmLibraryFunctions = [];
+
+var allExternPrimitives = ['Math_floor', 'Math_abs', 'Math_sqrt', 'Math_pow', 'Math_cos', 'Math_sin', 'Math_tan', 'Math_acos', 'Math_asin', 'Math_atan', 'Math_atan2', 'Math_exp', 'Math_log', 'Math_ceil', 'Math_imul', 'Math_min', 'Math_max', 'Math_clz32', 'Math_fround',
+                           'Int8Array', 'Uint8Array', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Float32Array', 'Float64Array'];
+// Specifies the set of referenced built-in primitives such as Math.max etc.
+var usedExternPrimitives = {};
+
+var SETJMP_LABEL = -1;
+
+var INDENTATION = ' ';
+
+var functionStubSigs = {};
+
+// Some JS-implemented library functions are proxied to be called on the main browser thread, if the Emscripten runtime is executing in a Web Worker.
+// Each such proxied function is identified via an ordinal number (this is not the same namespace as function pointers in general).
+var proxiedFunctionTable = ["null" /* Reserve index 0 for an undefined function*/];
+
+// proxiedFunctionInvokers contains bodies of the functions that will perform the proxying. These
+// are generated in a map to keep track which ones have already been emitted, to avoid outputting duplicates.
+// map: pair(sig, syncOrAsync) -> function body
+var proxiedFunctionInvokers = {};
+
+// We include asm2wasm imports if the trap mode is 'js' (to call out to JS to do some math stuff).
+// However, we always need some of them (like the frem import because % is in asm.js but not in wasm).
+// But we can avoid emitting all the others in many cases.
+var NEED_ALL_ASM2WASM_IMPORTS = BINARYEN_TRAP_MODE == 'js';
+
+// Used internally. set when there is a main() function.
+// Also set when in a linkable module, as the main() function might
+// arrive from a dynamically-linked library, and not necessarily
+// the current compilation unit.
+// Also set for STANDALONE_WASM since the _start function is needed to call
+// static ctors, even if there is no user main.
+var HAS_MAIN = ('_main' in IMPLEMENTED_FUNCTIONS) || MAIN_MODULE || SIDE_MODULE || STANDALONE_WASM;
+
+// Mangles the given C/JS side function name to assembly level function name (adds an underscore)
+function mangleCSymbolName(f) {
+  return f[0] == '$' ? f.substr(1) : '_' + f;
+}
+
+// Reverses C/JS name mangling: _foo -> foo, and foo -> $foo.
+function demangleCSymbolName(f) {
+  return f[0] == '_' ? f.substr(1) : '$' + f;
+}
+
+// JSifier
+function JSify(data, functionsOnly) {
   var mainPass = !functionsOnly;
 
-  // Add additional necessary items for the main pass
+  var itemsDict = { type: [], GlobalVariableStub: [], functionStub: [], function: [], GlobalVariable: [], GlobalVariablePostSet: [] };
+
   if (mainPass) {
+    // Add additional necessary items for the main pass. We can now do this since types are parsed (types can be used through
+    // generateStructInfo in library.js)
+
     LibraryManager.load();
+
     var libFuncsToInclude;
     if (INCLUDE_FULL_LIBRARY) {
-      assert(!BUILD_AS_SHARED_LIB, 'Cannot have both INCLUDE_FULL_LIBRARY and BUILD_AS_SHARED_LIB set.')
-      libFuncsToInclude = [];
+      assert(!SIDE_MODULE, 'Cannot have both INCLUDE_FULL_LIBRARY and SIDE_MODULE set.')
+      libFuncsToInclude = (MAIN_MODULE || SIDE_MODULE) ? DEFAULT_LIBRARY_FUNCS_TO_INCLUDE.slice(0) : [];
       for (var key in LibraryManager.library) {
-        if (!key.match(/__(deps|postset)$/)) {
+        if (!key.match(/__(deps|postset|inline|asm|sig)$/)) {
           libFuncsToInclude.push(key);
         }
       }
     } else {
-      libFuncsToInclude = ['memset', 'malloc', 'free'];
+      libFuncsToInclude = DEFAULT_LIBRARY_FUNCS_TO_INCLUDE;
     }
     libFuncsToInclude.forEach(function(ident) {
       data.functionStubs.push({
-        intertype: 'functionStub',
-        ident: '_' + ident
+        ident: mangleCSymbolName(ident)
       });
     });
   }
 
-  // Does simple 'macro' substitution, using Django-like syntax,
-  // {{{ code }}} will be replaced with |eval(code)|.
-  function processMacros(text) {
-    return text.replace(/{{{[^}]+}}}/g, function(str) {
-      str = str.substr(3, str.length-6);
-      return eval(str).toString();
-    });
-  }
+  function processLibraryFunction(snippet, ident, finalName) {
+    // It is possible that when printing the function as a string on Windows, the js interpreter we are in returns the string with Windows
+    // line endings \r\n. This is undesirable, since line endings are managed in the form \n in the output for binary file writes, so
+    // make sure the endings are uniform.
+    snippet = snippet.toString().replace(/\r\n/gm,"\n");
+    assert(snippet.indexOf('XXX missing C define') == -1,
+           'Trying to include a library function with missing C defines: ' + finalName + ' | ' + snippet);
 
-  substrate = new Substrate('JSifyer');
-
-  var GLOBAL_VARIABLES = !mainPass ? givenGlobalVariables : data.globalVariables;
-
-  Functions.currFunctions = !mainPass ? givenFunctions.currFunctions : {};
-  Functions.currExternalFunctions = !mainPass ? givenFunctions.currExternalFunctions : {};
-
-  // Now that first-pass analysis has completed (so we have basic types, etc.), we can get around to handling unparsedFunctions
-  (!mainPass ? data.functions : data.unparsedFunctions.concat(data.functions)).forEach(function(func) {
-    // Save just what we need, to save memory
-    Functions.currFunctions[func.ident] = {
-      hasVarArgs: func.hasVarArgs,
-      numParams: func.params.length,
-      labelIds: func.labelIds // TODO: We need this for globals, but perhaps we can calculate them early and free this
-   };
-  });
-
-  data.functionStubs.forEach(function(func) {
-    // Don't overwrite stubs that have more info.
-    if (!Functions.currExternalFunctions.hasOwnProperty(func.ident) ||
-        !Functions.currExternalFunctions[func.ident].numParams === undefined) {
-      Functions.currExternalFunctions[func.ident] = {
-        hasVarArgs: func.hasVarArgs,
-        numParams: func.params && func.params.length
-      };
-    }
-  });
-
-  for (var i = 0; i < data.unparsedFunctions.length; i++) {
-    var func = data.unparsedFunctions[i];
-    dprint('unparsedFunctions', '====================\n// Processing |' + func.ident + '|, ' + i + '/' + data.unparsedFunctions.length);
-    //var t = Date.now();
-    func.JS = JSify(analyzer(intertyper(func.lines, true, func.lineNum-1)), true, Functions, GLOBAL_VARIABLES);
-    //t = (Date.now()-t)/1000;
-    //dprint('unparsedFunctions', 'unparsedFunction took ' + t + ' seconds.');
-    delete func.lines; // clean up memory as much as possible
-  }
-
-  if (data.unparsedFunctions.length > 0) {
-    // We are now doing the final JS generation
-    dprint('unparsedFunctions', '== Completed unparsedFunctions ==\n');
-
-    // Save some memory, before the final heavy lifting
-    //Functions.currFunctions = null;
-    //Functions.currExternalFunctions = null;
-    //Debugging.clear();
-  }
-
-  // Actors
-
-  // type
-  substrate.addActor('Type', {
-    processItem: function(item) {
-      var type = Types.types[item.name_];
-      var niceName = toNiceIdent(item.name_);
-      // We might export all of Types.types, cleaner that way, but do not want slowdowns in accessing flatteners
-      item.JS = 'var ' + niceName + '___SIZE = ' + Types.types[item.name_].flatSize + '; // ' + item.name_ + '\n';
-      if (type.needsFlattening && !type.flatFactor) {
-        item.JS += 'var ' + niceName + '___FLATTENER = ' + JSON.stringify(Types.types[item.name_].flatIndexes) + ';';
+    // name the function; overwrite if it's already named
+    snippet = snippet.replace(/function(?:\s+([^(]+))?\s*\(/, 'function ' + finalName + '(');
+    // Apply special js library debug modes
+    if (!LibraryManager.library[ident + '__asm']) {
+      // apply LIBRARY_DEBUG if relevant
+      if (LIBRARY_DEBUG) {
+        snippet = modifyFunction(snippet, function(name, args, body) {
+          return 'function ' + name + '(' + args + ') {\n' +
+                 'var ret = (function() { if (runtimeDebug) err("[library call:' + finalName + ': " + Array.prototype.slice.call(arguments).map(prettyPrint) + "]");\n' +
+                  body +
+                  '}).apply(this, arguments); if (runtimeDebug && typeof ret !== "undefined") err("  [     return:" + prettyPrint(ret)); return ret; \n}\n';
+        });
       }
-      return [item];
     }
-  });
-
-  function makeEmptyStruct(type) {
-    var ret = [];
-    var typeData = Types.types[type];
-    assertTrue(typeData);
-    for (var i = 0; i < typeData.flatSize; i++) {
-      ret.push(0);
-    }
-    return ret;
+    return snippet;
   }
 
-  function alignStruct(values, type) {
-    var typeData = Types.types[type];
-    assertTrue(typeData);
-    var ret = [];
-    var i = 0, soFar = 0;
-    while (i < values.length) {
-      // Pad until the right place
-      var padded = typeData.flatFactor ? typeData.flatFactor*i : typeData.flatIndexes[i];
-      while (soFar < padded) {
-        ret.push(0);
-        soFar++;
+  // functionStub
+  function functionStubHandler(item) {
+    // In LLVM, exceptions generate a set of functions of form __cxa_find_matching_catch_1(), __cxa_find_matching_catch_2(), etc.
+    // where the number specifies the number of arguments. In Emscripten, route all these to a single function '__cxa_find_matching_catch'
+    // that variadically processes all of these functions using JS 'arguments' object.
+    if (item.ident.startsWith('___cxa_find_matching_catch_')) {
+      if (DISABLE_EXCEPTION_THROWING) {
+        error('DISABLE_EXCEPTION_THROWING was set (likely due to -fno-exceptions), which means no C++ exception throwing support code is linked in, but exception catching code appears. Either do not set DISABLE_EXCEPTION_THROWING (if you do want exception throwing) or compile all source files with -fno-except (so that no exceptions support code is required); also make sure DISABLE_EXCEPTION_CATCHING is set to the right value - if you want exceptions, it should be off, and vice versa.');
+        return;
       }
-      // Add current value(s)
-      var currValue = flatten(values[i]);
-      ret.push(currValue);
-      i += 1;
-      soFar += typeof currValue === 'object' ? currValue.length : 1;
+      var num = +item.ident.split('_').slice(-1)[0];
+      addCxaCatch(num);
+      // Continue, with the code below emitting the proper JavaScript based on
+      // what we just added to the library.
     }
-    while (soFar < typeData.flatSize) {
-      ret.push(0);
-      soFar++;
-    }
-    return ret;
-  }
 
-  // Gets an entire constant expression
-  function makeConst(value, type, ident) {
-    //dprint('jsifier const: ' + JSON.stringify(value) + ',' + type + '\n');
-    if (value.intertype in PARSABLE_LLVM_FUNCTIONS) {
-      return [finalizeLLVMFunctionCall(value)];
-    } else if (Runtime.isNumberType(type) || pointingLevels(type) >= 1) {
-      return indexizeFunctions(parseNumerical(value.value), type);
-    } else if (value.intertype === 'emptystruct') {
-      return makeEmptyStruct(type);
-    } else if (value.intertype === 'string') {
-      return JSON.stringify(parseLLVMString(value.text)) +
-             ' /* ' + value.text.substr(0, 20).replace(/\*/g, '_') + ' */'; // make string safe for inclusion in comment
-    } else {
-      // Gets an array of constant items, separated by ',' tokens
-      function handleSegments(tokens) {
-        // Handle a single segment (after comma separation)
-        function handleSegment(segment) {
-          var ret;
-          if (segment.intertype === 'value') {
-            ret = segment.value.toString();
-          } else if (segment.intertype === 'emptystruct') {
-            ret = makeEmptyStruct(segment.type);
-          } else if (segment.intertype in PARSABLE_LLVM_FUNCTIONS) {
-            ret = finalizeLLVMFunctionCall(segment);
-          } else if (segment.intertype in set('struct', 'list')) {
-            ret = alignStruct(handleSegments(segment.contents), segment.type);
-          } else if (segment.intertype === 'string') {
-            ret = parseLLVMString(segment.text); // + ' /* ' + text + '*/';
-          } else if (segment.intertype === 'blockaddress') {
-            ret = finalizeBlockAddress(segment);
-          } else {
-            throw 'Invalid segment: ' + dump(segment);
+    function addFromLibrary(ident) {
+      if (ident in addedLibraryItems) return '';
+      addedLibraryItems[ident] = true;
+
+      // dependencies can be JS functions, which we just run
+      if (typeof ident == 'function') return ident();
+
+      // don't process any special identifiers. These are looked up when processing the base name of the identifier.
+      if (ident.endsWith('__sig') || ident.endsWith('__proxy') || ident.endsWith('__asm') || ident.endsWith('__inline') || ident.endsWith('__deps') || ident.endsWith('__postset')) {
+        return '';
+      }
+
+      var finalName = mangleCSymbolName(ident);
+
+      // if the function was implemented in compiled code, we just need to export it so we can reach it from JS
+      if (finalName in IMPLEMENTED_FUNCTIONS) {
+        EXPORTED_FUNCTIONS[finalName] = 1;
+        // stop here: we don't need to add anything from our js libraries, not even deps, compiled code is on it
+        return '';
+      }
+
+      // Don't replace implemented functions with library ones (which can happen when we add dependencies).
+      // Note: We don't return the dependencies here. Be careful not to end up where this matters
+      if (finalName in Functions.implementedFunctions) return '';
+
+      var noExport = false;
+
+      if (allExternPrimitives.indexOf(ident) != -1) {
+        usedExternPrimitives[ident] = 1;
+        return;
+      } else if ((!LibraryManager.library.hasOwnProperty(ident) && !LibraryManager.library.hasOwnProperty(ident + '__inline')) || SIDE_MODULE) {
+        if (!(finalName in IMPLEMENTED_FUNCTIONS) && !LINKABLE) {
+          if (ERROR_ON_UNDEFINED_SYMBOLS) {
+            error('undefined symbol: ' + ident);
+            warnOnce('To disable errors for undefined symbols use `-s ERROR_ON_UNDEFINED_SYMBOLS=0`')
+          } else if (VERBOSE || WARN_ON_UNDEFINED_SYMBOLS) {
+            warn('undefined symbol: ' + ident);
           }
-          assert(segment.type, 'Missing type for constant segment: ' + dump(segment));
-          return indexizeFunctions(ret, segment.type);
-        };
-        return tokens.map(handleSegment)
-      }
-      return alignStruct(handleSegments(value.contents), type);
-    }
-  }
-
-  function parseConst(value, type, ident) {
-    var constant = makeConst(value, type);
-    if (typeof constant === 'object') {
-      constant = flatten(constant).map(function(x) { return parseNumerical(x) })
-    }
-    return constant;
-  }
-
-  // globalVariable
-  substrate.addActor('GlobalVariable', {
-    processItem: function(item) {
-      item.intertype = 'GlobalVariableStub';
-      delete item.lines; // Save some memory
-      var ret = [item];
-      if (item.ident == '_llvm_global_ctors') {
-        item.JS = '\n__globalConstructor__ = function() {\n' +
-                    item.ctors.map(function(ctor) { return '  ' + toNiceIdent(ctor) + '();' }).join('\n') +
-                  '\n}\n';
-        return ret;
-      } else {
-        if (item.external && BUILD_AS_SHARED_LIB) {
-          // External variables in shared libraries should not be declared as
-          // they would shadow similarly-named globals in the parent.
-          item.JS = '';
-        } else {
-          item.JS = 'var ' + item.ident + ';';
         }
-        var constant = null;
-        if (item.external) {
-          // Import external global variables from the library if available.
-          var shortident = item.ident.slice(1);
-          if (LibraryManager.library[shortident] &&
-              LibraryManager.library[shortident].length &&
-              !BUILD_AS_SHARED_LIB) {
-            var val = LibraryManager.library[shortident];
-            var padding;
-            if (Runtime.isNumberType(item.type) || isPointerType(item.type)) {
-              padding = [item.type].concat(zeros(getNativeFieldSize(item.type)));
-            } else {
-              padding = makeEmptyStruct(item.type);
-            }
-            var padded = val.concat(padding.slice(val.length));
-            var js = item.ident + '=' + makePointer(JSON.stringify(padded), null, 'ALLOC_STATIC', item.type) + ';'
-            if (LibraryManager.library[shortident + '__postset']) {
-              js += '\n' + LibraryManager.library[shortident + '__postset'];
-            }
-            ret.push({
-              intertype: 'GlobalVariablePostSet',
-              JS: js
-            });
-          }
-          return ret;
+        if (!RELOCATABLE) {
+          // emit a stub that will fail at runtime
+          LibraryManager.library[ident] = new Function("err('missing function: " + ident + "'); abort(-1);");
         } else {
-          function needsPostSet(value) {
-            return value[0] in set('_', '(') || value.substr(0, 14) === 'CHECK_OVERFLOW';
+          var isGlobalAccessor = ident.startsWith('g$');
+          var realIdent = ident;
+          if (isGlobalAccessor) {
+            realIdent = realIdent.substr(2);
           }
 
-          constant = parseConst(item.value, item.type, item.ident);
-          if (typeof constant === 'string' && constant[0] != '[') {
-            constant = [constant]; // A single item. We may need a postset for it.
-          }
-          if (typeof constant === 'object') {
-            // This is a flattened object. We need to find its idents, so they can be assigned to later
-            constant.forEach(function(value, i) {
-              if (needsPostSet(value)) { // ident, or expression containing an ident
-                ret.push({
-                  intertype: 'GlobalVariablePostSet',
-                  JS: makeSetValue(item.ident, i, value, 'i32', false, true) // ignore=true, since e.g. rtti and statics cause lots of safe_heap errors
-                });
-                constant[i] = '0';
-              }
-            });
-            constant = '[' + constant.join(', ') + ']';
-          }
-          // NOTE: This is the only place that could potentially create static
-          //       allocations in a shared library.
-          constant = makePointer(constant, null, BUILD_AS_SHARED_LIB ? 'ALLOC_NORMAL' : 'ALLOC_STATIC', item.type);
+          var target = (SIDE_MODULE ? 'parent' : '') + "Module['" + mangleCSymbolName(realIdent) + "']";
+          var assertion = '';
+          if (ASSERTIONS) {
+            var what = 'function';
+            if (isGlobalAccessor) {
+              what = 'global';
+            }
+            assertion += 'if (!' + target + ') abort("external ' + what + ' \'' + realIdent + '\' is missing. perhaps a side module was not linked in? if this function was expected to arrive from a system library, try to build the MAIN_MODULE with EMCC_FORCE_STDLIBS=1 in the environment");\n';
 
-          var js = item.ident + '=' + constant + ';';
-          // Special case: class vtables. We make sure they are null-terminated, to allow easy runtime operations
-          if (item.ident.substr(0, 5) == '__ZTV') {
-            js += '\n' + makePointer('[0]', null, BUILD_AS_SHARED_LIB ? 'ALLOC_NORMAL' : 'ALLOC_STATIC', ['void*']) + ';';
           }
-          if (item.ident in EXPORTED_GLOBALS) {
-            js += '\nModule["' + item.ident + '"] = ' + item.ident + ';';
+          var functionBody;
+          if (isGlobalAccessor) {
+            functionBody = assertion + "return " + target + ";"
+          } else {
+            functionBody = assertion + "return " + target + ".apply(null, arguments);";
           }
-          return ret.concat({
-            intertype: 'GlobalVariable',
-            JS: js,
+          LibraryManager.library[ident] = new Function(functionBody);
+          if (SIDE_MODULE) {
+            // no dependencies, just emit the thunk
+            Functions.libraryFunctions[finalName] = 1;
+            return processLibraryFunction(LibraryManager.library[ident], ident, finalName);
+          }
+          noExport = true;
+        }
+      }
+
+      var original = LibraryManager.library[ident];
+      var snippet = original;
+      var redirectedIdent = null;
+      var deps = LibraryManager.library[ident + '__deps'] || [];
+      deps.forEach(function(dep) {
+        if (typeof snippet === 'string' && !(dep in LibraryManager.library)) warn('missing library dependency ' + dep + ', make sure you are compiling with the right options (see #ifdefs in src/library*.js)');
+      });
+      var isFunction = false;
+
+      if (typeof snippet === 'string') {
+        if (snippet[0] != '=') {
+          var target = LibraryManager.library[snippet];
+          if (target) {
+            // Redirection for aliases. We include the parent, and at runtime make ourselves equal to it.
+            // This avoid having duplicate functions with identical content.
+            redirectedIdent = snippet;
+            deps.push(snippet);
+            snippet = mangleCSymbolName(snippet);
+          }
+          // In asm, we need to know about library functions. If there is a target, though, then no
+          // need to consider this a library function - we will call directly to it anyhow
+          if (!redirectedIdent && (typeof target == 'function' || /Math_\w+/.exec(snippet))) {
+            Functions.libraryFunctions[finalName] = 1;
+          }
+        }
+      } else if (typeof snippet === 'object') {
+        snippet = stringifyWithFunctions(snippet);
+      } else if (typeof snippet === 'function') {
+        isFunction = true;
+        snippet = processLibraryFunction(snippet, ident, finalName);
+        Functions.libraryFunctions[finalName] = 1;
+      }
+
+      var postsetId = ident + '__postset';
+      var postset = LibraryManager.library[postsetId];
+      if (postset) {
+        // A postset is either code to run right now, or some text we should emit.
+        // If it's code, it may return some text to emit as well.
+        if (typeof postset === 'function') {
+          postset = postset();
+        }
+        if (postset && !addedLibraryItems[postsetId] && !SIDE_MODULE) {
+          addedLibraryItems[postsetId] = true;
+          itemsDict.GlobalVariablePostSet.push({
+            JS: postset + ';'
           });
         }
       }
-    }
-  });
 
-  // alias
-  substrate.addActor('Alias', {
-    processItem: function(item) {
-      item.intertype = 'GlobalVariableStub';
-      var ret = [item];
-      item.JS = 'var ' + item.ident + ';';
-      // Set the actual value in a postset, since it may be a global variable. TODO: handle alias of alias (needs ordering)
-      ret.push({
-        intertype: 'GlobalVariablePostSet',
-        JS: item.ident + ' = ' + item.aliasee + ';'
-      });
-      return ret;
-    }
-  });
-
-  var moduleFunctions = set(data.unparsedFunctions.map(function(func) { return func.ident }));
-
-  var addedLibraryItems = {};
-
-  // functionStub
-  substrate.addActor('FunctionStub', {
-    processItem: function(item) {
-      var ret = [item];
-      var shortident = item.ident.substr(1);
-      if (BUILD_AS_SHARED_LIB) {
-        // Shared libraries reuse the runtime of their parents.
-        item.JS = '';
-      } else if (LibraryManager.library.hasOwnProperty(shortident)) {
-        function addFromLibrary(ident) {
-          if (ident in addedLibraryItems) return '';
-          // Don't replace implemented functions with library ones (which can happen when we add dependencies).
-          // Note: We don't return the dependencies here. Be careful not to end up where this matters
-          if (('_' + ident) in moduleFunctions) return '';
-
-          addedLibraryItems[ident] = true;
-          var snippet = LibraryManager.library[ident];
-          var redirectedIdent = null;
-          var deps = LibraryManager.library[ident + '__deps'] || [];
-          var isFunction = false;
-
-          if (typeof snippet === 'string') {
-            if (LibraryManager.library[snippet]) {
-              // Redirection for aliases. We include the parent, and at runtime make ourselves equal to it.
-              // This avoid having duplicate functions with identical content.
-              redirectedIdent = snippet;
-              deps.push(snippet);
-              snippet = '_' + snippet;
-            }
-          } else if (typeof snippet === 'object') {
-            if (snippet === null) {
-              snippet = 'null';
-            } else {
-              var members = [];
-              for (var property in snippet) {
-                if (typeof snippet[property] === 'function') {
-                  members.push(property + ': ' + snippet[property].toString());
-                } else {
-                  members.push(property + ': ' + JSON.stringify(snippet[property]));
-                }
-              }
-              snippet = '{' + members.join(', ') + ' }';
-            }
-          } else if (typeof snippet === 'function') {
-            isFunction = true;
-            snippet = snippet.toString();
-            // name the function; overwrite if it's already named
-            snippet = snippet.replace(/function(?:\s+([^(]+))?\s*\(/, 'function _' + ident + '(');
-          }
-
-          var postsetId = ident + '__postset';
-          var postset = LibraryManager.library[postsetId];
-          if (postset && !addedLibraryItems[postsetId]) {
-            addedLibraryItems[postsetId] = true;
-            ret.push({
-              intertype: 'GlobalVariablePostSet',
-              JS: postset
-            });
-          }
-
-          if (redirectedIdent) {
-            deps = deps.concat(LibraryManager.library[redirectedIdent + '__deps'] || []);
-          }
-          // $ident's are special, we do not prefix them with a '_'.
-          if (ident[0] === '$') {
-            ident = ident.substr(1);
-          } else {
-            ident = '_' + ident;
-          }
-          var text = (deps ? '\n' + deps.map(addFromLibrary).join('\n') : '');
-          text += isFunction ? snippet : 'var ' + ident + '=' + snippet + ';';
-          if (ident in EXPORTED_FUNCTIONS) {
-            text += '\nModule["' + ident + '"] = ' + ident + ';';
-          }
-          return text;
-        }
-        item.JS = addFromLibrary(shortident);
-      } else {
-        item.JS = 'var ' + item.ident + '; // stub for ' + item.ident;
+      if (redirectedIdent) {
+        deps = deps.concat(LibraryManager.library[redirectedIdent + '__deps'] || []);
       }
-      return ret;
-    }
-  });
-
-  // function splitter
-  substrate.addActor('FunctionSplitter', {
-    processItem: function(item) {
-      var ret = [item];
-      item.splitItems = 0;
-      item.labels.forEach(function(label) {
-        label.lines.forEach(function(line) {
-          line.func = item.ident;
-          line.funcData = item; // TODO: remove all these, access it globally
-          line.parentLabel = label.ident;
-          ret.push(line);
-          item.splitItems ++;
+      // In asm, dependencies implemented in C might be needed by JS library functions.
+      // We don't know yet if they are implemented in C or not. To be safe, export such
+      // special cases.
+      [LIBRARY_DEPS_TO_AUTOEXPORT].forEach(function(special) {
+        deps.forEach(function(dep) {
+          if (dep == special && !EXPORTED_FUNCTIONS[dep]) {
+            EXPORTED_FUNCTIONS[dep] = 1;
+          }
         });
       });
-
-      this.forwardItems(ret, 'FuncLineTriager');
-    }
-  });
-
-  // function reconstructor & post-JS optimizer
-  substrate.addActor('FunctionReconstructor', {
-    funcs: {},
-    seen: {},
-    processItem: function(item) {
-      if (this.seen[item.__uid__]) return null;
-      if (item.intertype == 'function') {
-        this.funcs[item.ident] = item;
-        item.relines = {};
-        this.seen[item.__uid__] = true;
-        return null;
-      }
-      var line = item;
-      var func = this.funcs[line.func];
-      if (!func) return null;
-
-      // Re-insert our line
-      this.seen[item.__uid__] = true;
-      var label = func.labels.filter(function(label) { return label.ident == line.parentLabel })[0];
-      label.lines = label.lines.map(function(line2) {
-        return (line2.lineNum !== line.lineNum) ? line2 : line;
-      });
-      func.splitItems --;
-      // OLD    delete line.funcData; // clean up
-      if (func.splitItems > 0) return null;
-
-      // We have this function all reconstructed, go and finalize it's JS!
-
-      func.JS = '\nfunction ' + func.ident + '(' + func.paramIdents.join(', ') + ') {\n';
-
-      func.JS += '  ' + RuntimeGenerator.stackEnter(func.initialStack) + ';\n';
-
-      if (LABEL_DEBUG) func.JS += "  print(INDENT + ' Entering: " + func.ident + "'); INDENT += '  ';\n";
-
-      if (true) { // TODO: optimize away when not needed
-        func.JS += '  var __label__;\n';
-      }
-      if (func.hasPhi) {
-        func.JS += '  var __lastLabel__ = null;\n';
-      }
-
-      // Walk function blocks and generate JS
-      function walkBlock(block, indent) {
-        if (!block) return '';
-        dprint('relooping', 'walking block: ' + block.type + ',' + block.entries + ' : ' + block.labels.length);
-        function getLabelLines(label, indent) {
-          if (!label) return '';
-          var ret = '';
-          if (LABEL_DEBUG) {
-            ret += indent + "print(INDENT + '" + func.ident + ":" + label.ident + "');\n";
+      if (VERBOSE) printErr('adding ' + finalName + ' and deps ' + deps + ' : ' + (snippet + '').substr(0, 40));
+      var depsText = (deps ? '\n' + deps.map(addFromLibrary).filter(function(x) { return x != '' }).join('\n') : '');
+      var contentText;
+      if (isFunction) {
+        // Emit the body of a JS library function.
+        var proxyingMode = LibraryManager.library[ident + '__proxy'];
+        if (USE_PTHREADS && proxyingMode) {
+          if (proxyingMode !== 'sync' && proxyingMode !== 'async') {
+            throw 'Invalid proxyingMode ' + ident + '__proxy: \'' + proxyingMode + '\' specified!';
           }
-          if (EXECUTION_TIMEOUT > 0) {
-            ret += indent + 'if (Date.now() - START_TIME >= ' + (EXECUTION_TIMEOUT*1000) + ') throw "Timed out!" + (new Error().stack);\n';
-          }
-          // for special labels we care about (for phi), mark that we visited them
-          return ret + label.lines.map(function(line) { return line.JS + (Debugging.on ? Debugging.getComment(line.lineNum) : '') })
-                                  .join('\n')
-                                  .split('\n') // some lines include line breaks
-                                  .map(function(line) { return indent + line })
-                                  .join('\n');
-        }
-        var ret = '';
-        if (block.type == 'emulated') {
-          if (block.labels.length > 1) {
-            if (block.entries.length == 1) {
-              ret += indent + '__label__ = ' + getLabelId(block.entries[0]) + '; ' + (SHOW_LABELS ? '/* ' + block.entries[0] + ' */' : '') + '\n';
-            } // otherwise, should have been set before!
-            ret += indent + 'while(1) switch(__label__) {\n';
-            ret += block.labels.map(function(label) {
-              return indent + '  case ' + getLabelId(label.ident) + ': // ' + label.ident + '\n'
-                            + getLabelLines(label, indent + '    ');
-            }).join('\n');
-            ret += '\n' + indent + '  default: assert(0, "bad label: " + __label__);\n' + indent + '}';
-          } else {
-            ret += (SHOW_LABELS ? indent + '/* ' + block.entries[0] + ' */' : '') + '\n' + getLabelLines(block.labels[0], indent);
-          }
-          ret += '\n';
-        } else if (block.type == 'reloop') {
-          ret += indent + (block.needBlockId ? block.id + ': ' : '') + 'while(1) { ' + (SHOW_LABELS ? ' /* ' + block.entries + + ' */' : '') + '\n';
-          ret += walkBlock(block.inner, indent + '  ');
-          ret += indent + '}\n';
-        } else if (block.type == 'multiple') {
-          var first = true;
-          var multipleIdent = '';
-          if (!block.loopless) {
-            ret += indent + (block.needBlockId ? block.id + ': ' : '') + 'do { \n';
-            multipleIdent = '  ';
-          }
-          var stolen = block.stolenCondition;
-          if (stolen) {
-            var intendedTrueLabel = stolen.labelTrue;
-            assert(block.entryLabels.length <= 2);
-            [stolen.labelTrue, stolen.labelFalse].forEach(function(entry) {
-              var branch = makeBranch(entry, stolen.currLabelId || null);
-              entryLabel = block.entryLabels.filter(function(possible) { return possible.ident === getActualLabelId(entry) })[0];
-              if (branch.length < 5 && !entryLabel) return;
-              //ret += indent + multipleIdent + (first ? '' : 'else ') +
-              //       'if (' + (entry == intendedTrueLabel ? '' : '!') + stolen.ident + ')' + ' {\n';
-              ret += indent + multipleIdent + (first ? 'if (' + (entry == intendedTrueLabel ? '' : '!') + stolen.ident + ')' : 'else') + ' {\n';
-              ret += indent + multipleIdent + '  ' + branch + '\n';
-              if (entryLabel) {
-                ret += walkBlock(entryLabel.block, indent + '  ' + multipleIdent);
-              }
-              ret += indent + multipleIdent + '}\n';
-              first = false;
-            });
-          } else {
-            // TODO: Find out cases where the final if is not needed - where we know we must be in a specific label at that point
-            block.entryLabels.forEach(function(entryLabel) {
-              ret += indent + multipleIdent + (first ? '' : 'else ') + 'if (__label__ == ' + getLabelId(entryLabel.ident) + ') {\n';
-              ret += walkBlock(entryLabel.block, indent + '  ' + multipleIdent);
-              ret += indent + multipleIdent + '}\n';
-              first = false;
-            });
-          }
-          if (!block.loopless) {
-            ret += indent + '} while(0);\n';
-          }
+          var sync = proxyingMode === 'sync';
+          assert(typeof original === 'function');
+          contentText = modifyFunction(snippet, function(name, args, body) {
+            return 'function ' + name + '(' + args + ') {\n' +
+                   'if (ENVIRONMENT_IS_PTHREAD) return _emscripten_proxy_to_main_thread_js(' + proxiedFunctionTable.length + ', ' + (+sync) + (args ? ', ' : '') + args + ');\n' + body + '}\n';
+          });
+          proxiedFunctionTable.push(finalName);
         } else {
-          throw "Walked into an invalid block type: " + block.type;
+          contentText = snippet; // Regular JS function that will be executed in the context of the calling thread.
         }
-        return ret + walkBlock(block.next, indent);
-      }
-      func.JS += walkBlock(func.block, '  ');
-      // Finalize function
-      if (LABEL_DEBUG) func.JS += "  INDENT = INDENT.substr(0, INDENT.length-2);\n";
-      // Add an unneeded return, needed for strict mode to not throw warnings in some cases.
-      // If we are not relooping, then switches make it unimportant to have this (and, we lack hasReturn anyhow)
-      if (RELOOP && func.lines.length > 0 && func.labels.filter(function(label) { return label.hasReturn }).length > 0) {
-        func.JS += '  return' + (func.returnType !== 'void' ? ' null' : '') + ';\n';
-      }
-      func.JS += '}\n';
-      if (func.ident in EXPORTED_FUNCTIONS) {
-        func.JS += 'Module["' + func.ident + '"] = ' + func.ident + ';';
-      }
-
-      return func;
-    }
-  });
-
-  function getVarData(funcData, ident) {
-    return funcData.variables[ident] || GLOBAL_VARIABLES[ident] || null;
-  }
-
-  function getVarImpl(funcData, ident) {
-    if (ident === 'null') return VAR_NATIVIZED; // like nativized, in that we have the actual value right here
-    var data = getVarData(funcData, ident);
-    assert(data, 'What variable is this? |' + ident + '|');
-    return data.impl;
-  }
-
-  substrate.addActor('FuncLineTriager', {
-    processItem: function(item) {
-      if (item.intertype == 'function') {
-        this.forwardItem(item, 'FunctionReconstructor');
-      } else if (item.JS) {
-        if (item.parentLineNum) {
-          this.forwardItem(item, 'AssignReintegrator');
-        } else {
-          this.forwardItem(item, 'FunctionReconstructor');
-        }
+      } else if (typeof snippet === 'string' && snippet.indexOf(';') == 0) {
+        // In JS libraries
+        //   foo: ';[code here verbatim]'
+        //  emits
+        //   'var foo;[code here verbatim];'
+        contentText = 'var ' + finalName + snippet;
+        if (snippet[snippet.length-1] != ';' && snippet[snippet.length-1] != '}') contentText += ';';
       } else {
-        this.forwardItem(item, 'Intertype:' + item.intertype);
+        // In JS libraries
+        //   foo: '=[value]'
+        //  emits
+        //   'var foo = [value];'
+        if (typeof snippet === 'string' && snippet[0] == '=') snippet = snippet.substr(1);
+        contentText = 'var ' + finalName + '=' + snippet + ';';
       }
-    }
-  });
-
-  // assignment
-  substrate.addActor('Intertype:assign', {
-    processItem: function(item) {
-      var pair = splitItem(item, 'value', ['funcData']);
-      this.forwardItem(pair.parent, 'AssignReintegrator');
-      this.forwardItem(pair.child, 'FuncLineTriager');
-    }
-  });
-  substrate.addActor('AssignReintegrator', makeReintegrator(function(item, child) {
-    // 'var', since this is SSA - first assignment is the only assignment, and where it is defined
-    item.JS = (item.overrideSSA ? '' : 'var ') + toNiceIdent(item.ident);
-
-    var type = item.value.type;
-    var value = parseNumerical(item.value.JS);
-    var impl = getVarImpl(item.funcData, item.ident);
-    switch (impl) {
-      case VAR_NATIVE: {
-        break;
+      var sig = LibraryManager.library[ident + '__sig'];
+      if (isFunction && sig && LibraryManager.library[ident + '__asm']) {
+        // asm library function, add it as generated code alongside the generated code
+        Functions.implementedFunctions[finalName] = sig;
+        asmLibraryFunctions.push(contentText);
+        contentText = ' ';
+        Functions.libraryFunctions[finalName] = 2;
+        noExport = true; // if it needs to be exported, that will happen in emscripten.py
       }
-      case VAR_NATIVIZED: {
-        // SSA, so this must be the alloca. No need for a value
-        if (!item.overrideSSA) value = '';
-        break;
+      // asm module exports are done in emscripten.py, after the asm module is ready. Here
+      // we also export library methods as necessary.
+      if ((EXPORT_ALL || (finalName in EXPORTED_FUNCTIONS)) && !noExport) {
+        contentText += '\nModule["' + finalName + '"] = ' + finalName + ';';
       }
-      case VAR_EMULATED: {
-        break;
+      if (!LibraryManager.library[ident + '__asm']) {
+        // If we are not an asm library func, and we have a dep that is, then we need to call
+        // into the asm module to reach that dep. so it must be exported from the asm module.
+        // We set EXPORTED_FUNCTIONS here to tell emscripten.py to do that.
+        deps.forEach(function(dep) {
+          if (LibraryManager.library[dep + '__asm']) {
+            EXPORTED_FUNCTIONS[mangleCSymbolName(dep)] = 0;
+          }
+        });
       }
-      default: throw 'zz unknown impl: ' + impl;
+      return depsText + contentText;
     }
-    if (value)
-      item.JS += '=' + value;
-    item.JS += ';';
 
-    this.forwardItem(item, 'FunctionReconstructor');
-  }));
-
-  // Function lines
-  function makeFuncLineActor(intertype, func) {
-    return substrate.addActor('Intertype:' + intertype, {
-      processItem: function(item) {
-        item.JS = func(item);
-        if (!item.JS) throw "No JS generated for " + dump(item);
-        this.forwardItem(item, 'FuncLineTriager');
-      }
-    });
-  }
-  makeFuncLineActor('store', function(item) {
-    var value = finalizeLLVMParameter(item.value);
-    if (pointingLevels(item.pointerType) == 1) {
-      value = parseNumerical(value, item.valueType);
-    }
-    var impl = VAR_EMULATED;
-    if (item.pointer.intertype == 'value') {
-      impl = getVarImpl(item.funcData, item.ident);
-    }
-    switch (impl) {
-      case VAR_NATIVIZED:
-        return item.ident + '=' + value + ';'; // We have the actual value here
-        break;
-      case VAR_EMULATED:
-        if (item.pointer.intertype == 'value') {
-          return makeSetValue(item.ident, 0, value, item.valueType);
-        } else {
-          return makeSetValue(0, finalizeLLVMParameter(item.pointer), value, item.valueType);
-        }
-        break;
-      default:
-        throw 'unknown [store] impl: ' + impl;
-    }
-    return null;
-  });
-
-  makeFuncLineActor('deleted', function(item) { return ';' });
-
-  function getLabelId(label) {
-    var funcData = Framework.currItem.funcData;
-    var labelIds = funcData.labelIds;
-    if (labelIds[label] !== undefined) return labelIds[label];
-    return labelIds[label] = funcData.labelIdCounter++;
-  }
-
-  function makeBranch(label, lastLabel, labelIsVariable) {
-    var pre = '';
-    if (lastLabel) {
-      pre = '__lastLabel__ = ' + getLabelId(lastLabel) + '; ';
-    }
-    if (label[0] == 'B') {
-      assert(!labelIsVariable, 'Cannot handle branches to variables with special branching options');
-      var parts = label.split('|');
-      var trueLabel = parts[1] || '';
-      var oldLabel = parts[2] || '';
-      var labelSetting = oldLabel ? '__label__ = ' + getLabelId(oldLabel) + ';' +
-                         (SHOW_LABELS ? ' /* to: ' + cleanLabel(oldLabel) + ' */' : '') : ''; // TODO: optimize away the setting
-      if (label[1] == 'R') {
-        return pre + labelSetting + 'break ' + trueLabel + ';';
-      } else if (label[1] == 'C') { // CONT
-        return pre + labelSetting + 'continue ' + trueLabel + ';';
-      } else if (label[1] == 'N') { // NOPP
-        return pre + ';'; // Returning no text might confuse this parser
-      } else if (label[1] == 'J') { // JSET
-        return pre + labelSetting + ';';
+    itemsDict.functionStub.push(item);
+    var shortident = demangleCSymbolName(item.ident);
+    // If this is not linkable, anything not in the library is definitely missing
+    if (item.ident in DEAD_FUNCTIONS) {
+      if (LibraryManager.library[shortident + '__asm']) {
+        warn('cannot kill asm library function ' + item.ident);
       } else {
-        throw 'Invalid B-op in branch: ' + trueLabel + ',' + oldLabel;
+        LibraryManager.library[shortident] = new Function("err('dead function: " + shortident + "'); abort(-1);");
+        delete LibraryManager.library[shortident + '__inline'];
+        delete LibraryManager.library[shortident + '__deps'];
       }
-    } else {
-      if (!labelIsVariable) label = getLabelId(label);
-      return pre + '__label__ = ' + label + ';' + (SHOW_LABELS ? ' /* to: ' + cleanLabel(label) + ' */' : '') + ' break;';
     }
+    item.JS = addFromLibrary(shortident);
   }
-
-  makeFuncLineActor('branch', function(item) {
-    if (item.stolen) return ';'; // We will appear where we were stolen to
-    if (!item.condition) {
-      return makeBranch(item.label, item.currLabelId);
-    } else {
-      var condition = finalizeLLVMParameter(item.condition);
-      var labelTrue = makeBranch(item.labelTrue, item.currLabelId);
-      var labelFalse = makeBranch(item.labelFalse, item.currLabelId);
-      if (labelTrue == ';' && labelFalse == ';') return ';';
-      var head = 'if (' + condition + ') { ';
-      var head2 = 'if (!(' + condition + ')) { ';
-      var else_ = ' } else { ';
-      var tail = ' }';
-      if (labelTrue == ';') {
-        return head2 + labelFalse + tail;
-      } else if (labelFalse == ';') {
-        return head + labelTrue + tail;
-      } else {
-        return head + labelTrue + else_ + labelFalse + tail;
-      }
-    }
-  });
-  makeFuncLineActor('switch', function(item) {
-    var ret = '';
-    var first = true;
-    item.switchLabels.forEach(function(switchLabel) {
-      if (!first) {
-        ret += 'else ';
-      } else {
-        first = false;
-      }
-      ret += 'if (' + item.ident + ' == ' + switchLabel.value + ') {\n';
-      ret += '  ' + makeBranch(switchLabel.label, item.currLabelId || null) + '\n';
-      ret += '}\n';
-    });
-    ret += 'else {\n';
-    ret += makeBranch(item.defaultLabel, item.currLabelId) + '\n';
-    ret += '}\n';
-    if (item.value) {
-      ret += ' ' + toNiceIdent(item.value);
-    }
-    return ret;
-  });
-  makeFuncLineActor('return', function(item) {
-    var ret = RuntimeGenerator.stackExit(item.funcData.initialStack) + ';\n';
-    if (LABEL_DEBUG) {
-      ret += "print(INDENT + 'Exiting: " + item.funcData.ident + "');\n"
-          +  "INDENT = INDENT.substr(0, INDENT.length-2);\n";
-    }
-    ret += 'return';
-    if (item.value) {
-      ret += ' ' + finalizeLLVMParameter(item.value);
-    }
-    return ret + ';';
-  });
-  makeFuncLineActor('invoke', function(item) {
-    // Wrapping in a function lets us easily return values if we are
-    // in an assignment
-    var call_ = makeFunctionCall(item.ident, item.params, item.funcData);
-    var branch = makeBranch(item.toLabel, item.currLabelId);
-    if (DISABLE_EXCEPTIONS) return call_ + '; ' + branch;
-    var ret = '(function() { try { __THREW__ = false; return '
-            + call_ + ' '
-            + '} catch(e) { '
-            + 'if (typeof e != "number") throw e; '
-            + 'if (ABORT) throw e; __THREW__ = true; '
-            + (EXCEPTION_DEBUG ? 'print("Exception: " + e + ", currently at: " + (new Error().stack)); ' : '')
-            + 'return null } })(); if (!__THREW__) { ' + branch
-            + ' } else { ' + makeBranch(item.unwindLabel, item.currLabelId) + ' }';
-    return ret;
-  });
-  makeFuncLineActor('load', function(item) {
-    var value = finalizeLLVMParameter(item.pointer);
-    var impl = item.ident ? getVarImpl(item.funcData, item.ident) : VAR_EMULATED;
-    switch (impl) {
-      case VAR_NATIVIZED: {
-        return value; // We have the actual value here
-      }
-      case VAR_EMULATED: return makeGetValue(value, null, item.type, 0, item.unsigned);
-      default: throw "unknown [load] impl: " + impl;
-    }
-  });
-  makeFuncLineActor('extractvalue', function(item) {
-    assert(item.indexes.length == 1); // TODO: use getelementptr parsing stuff, for depth. For now, we assume that LLVM aggregates are flat,
-                                      //       and we emulate them using simple JS objects { f1: , f2: , } etc., for speed
-    return item.ident + '.f' + item.indexes[0][0].text;
-  });
-  makeFuncLineActor('indirectbr', function(item) {
-    return makeBranch(finalizeLLVMParameter(item.pointer), item.currLabelId, true);
-  });
-  makeFuncLineActor('alloca', function(item) {
-    if (typeof item.allocatedIndex === 'number') {
-      if (item.allocatedSize === 0) return ''; // This will not actually be shown - it's nativized
-      return getFastValue('__stackBase__', '+', item.allocatedIndex.toString());
-    } else {
-      return RuntimeGenerator.stackAlloc(getFastValue(calcAllocatedSize(item.allocatedType), '*', item.allocatedNum));
-    }
-  });
-  makeFuncLineActor('phi', function(item) {
-    var params = item.params;
-    function makeOne(i) {
-      if (i === params.length-1) {
-        return finalizeLLVMParameter(params[i].value);
-      }
-      return '__lastLabel__ == ' + getLabelId(params[i].label) + ' ? ' + 
-                                   finalizeLLVMParameter(params[i].value) + ' : (' + makeOne(i+1) + ')';
-    }
-    return makeOne(0);
-  });
-
-  makeFuncLineActor('mathop', processMathop);
-
-  makeFuncLineActor('bitcast', function(item) {
-    return finalizeLLVMParameter(item.params[0]);
-  });
-
-  function makeFunctionCall(ident, params, funcData) {
-    // We cannot compile assembly. See comment in intertyper.js:'Call'
-    assert(ident != 'asm', 'Inline assembly cannot be compiled to JavaScript!');
-
-    // Special cases
-    if (ident == '_llvm_va_start') {
-      // varargs - we received a pointer to the varargs as a final 'extra' parameter
-      var data = 'arguments[' + Framework.currItem.funcData.ident + '.length]';
-      return makeSetValue(params[0].ident, 0, data, 'void*');
-    } else if (ident == '_llvm_va_end') {
-      return ';';
-    }
-
-    var func = Functions.currFunctions[ident] || Functions.currExternalFunctions[ident];
-
-    var args = [];
-    var argsTypes = [];
-    var varargs = [];
-    var varargsTypes = [];
-    var useJSArgs = (ident.slice(1) + '__jsargs') in LibraryManager.library;
-
-    params.forEach(function(param, i) {
-      var val = finalizeParam(param);
-      if (!func || !func.hasVarArgs || i < func.numParams-1 || useJSArgs) {
-        args.push(val);
-        argsTypes.push(param.type);
-      } else {
-        varargs.push(val);
-        varargs = varargs.concat(zeros(getNativeFieldSize(param.type)-1));
-        varargsTypes.push(param.type);
-        varargsTypes = varargsTypes.concat(zeros(getNativeFieldSize(param.type)-1));
-      }
-    });
-
-    args = args.map(function(arg, i) { return indexizeFunctions(arg, argsTypes[i]) });
-    varargs = varargs.map(function(vararg, i) { return vararg === 0 ? 0 : indexizeFunctions(vararg, varargsTypes[i]) });
-
-    if (func && func.hasVarArgs && !useJSArgs) {
-      if (varargs.length === 0) {
-        varargs = [0];
-        varargsTypes = ['i32'];
-      }
-      varargs = makePointer('[' + varargs + ']', 0, 'ALLOC_STACK', varargsTypes);
-    }
-
-    if (getVarData(funcData, ident)) {
-      ident = 'FUNCTION_TABLE[' + ident + ']';
-    }
-
-    return ident + '(' + args.concat(varargs).join(', ') + ')';
-  }
-  makeFuncLineActor('getelementptr', function(item) { return finalizeLLVMFunctionCall(item) });
-  makeFuncLineActor('call', function(item) {
-    return makeFunctionCall(item.ident, item.params, item.funcData) + (item.standalone ? ';' : '');
-  });
-
-  makeFuncLineActor('unreachable', function(item) { return 'throw "Reached an unreachable!"' }); // Original .ll line: ' + item.lineNum + '";' });
 
   // Final combiner
 
-  function finalCombiner(items) {
-    dprint('unparsedFunctions', 'Starting finalCombiner');
-    var itemsDict = { type: [], GlobalVariableStub: [], functionStub: [], function: [], GlobalVariable: [], GlobalVariablePostSet: [] };
-    items.forEach(function(item) {
-      item.lines = null;
-      var small = { intertype: item.intertype, JS: item.JS }; // Release memory
-      itemsDict[small.intertype].push(small);
-    });
-    items = null;
+  function finalCombiner() {
+    var splitPostSets = splitter(itemsDict.GlobalVariablePostSet, function(x) { return x.ident && x.dependencies });
+    itemsDict.GlobalVariablePostSet = splitPostSets.leftIn;
+    var orderedPostSets = splitPostSets.splitOut;
 
-    var generated = [];
-    if (mainPass) {
-      generated = generated.concat(itemsDict.type).concat(itemsDict.GlobalVariableStub).concat(itemsDict.functionStub);
-    }
-    generated = generated.concat(itemsDict.function).concat(data.unparsedFunctions);
-
-    if (!mainPass) return generated.map(function(item) { return item.JS }).join('\n');
-
-    // We are ready to print out the data, but must do so carefully - we are
-    // dealing with potentially *huge* strings. Convenient replacements and
-    // manipulations may create in-memory copies, and we may OOM.
-    //
-    // Final shape that we now create:
-    //    shell
-    //      (body)
-    //        preamble
-    //          runtime
-    //        generated code
-    //        postamble
-    //          global_vars
-
-    var shellFile = BUILD_AS_SHARED_LIB ? 'shell_sharedlib.js' : 'shell.js';
-    var shellParts = read(shellFile).split('{{BODY}}');
-    print(shellParts[0]);
-      var preFile = BUILD_AS_SHARED_LIB ? 'preamble_sharedlib.js' : 'preamble.js';
-      var pre = processMacros(preprocess(read(preFile).replace('{{RUNTIME}}', getRuntime()), CONSTANTS));
-      print(pre);
-      print('Runtime.QUANTUM_SIZE = ' + QUANTUM_SIZE);
-      if (RUNTIME_TYPE_INFO) {
-        Types.cleanForRuntime();
-        print('Runtime.typeInfo = ' + JSON.stringify(Types.types));
-        print('Runtime.structMetadata = ' + JSON.stringify(Types.structMetadata));
+    var limit = orderedPostSets.length * orderedPostSets.length;
+    for (var i = 0; i < orderedPostSets.length; i++) {
+      for (var j = i+1; j < orderedPostSets.length; j++) {
+        if (orderedPostSets[j].ident in orderedPostSets[i].dependencies) {
+          var temp = orderedPostSets[i];
+          orderedPostSets[i] = orderedPostSets[j];
+          orderedPostSets[j] = temp;
+          i--;
+          limit--;
+          assert(limit > 0, 'Could not sort postsets!');
+          break;
+        }
       }
-      generated.forEach(function(item) { print(indentify(item.JS || '', 2)); });
-      print(Functions.generateIndexing());
+    }
 
-      var postFile = BUILD_AS_SHARED_LIB ? 'postamble_sharedlib.js' : 'postamble.js';
-      var postParts = processMacros(preprocess(read(postFile), CONSTANTS)).split('{{GLOBAL_VARS}}');
-      print(postParts[0]);
-        itemsDict.GlobalVariable.forEach(function(item) { print(indentify(item.JS, 4)); });
-        itemsDict.GlobalVariablePostSet.forEach(function(item) { print(indentify(item.JS, 4)); });
-      print(postParts[1]);
-    print(shellParts[1]);
-    return null;
+    itemsDict.GlobalVariablePostSet = itemsDict.GlobalVariablePostSet.concat(orderedPostSets);
+
+    //
+
+    if (!mainPass) {
+      if (!Variables.generatedGlobalBase) {
+        Variables.generatedGlobalBase = true;
+        // Globals are done, here is the rest of static memory
+        if (SIDE_MODULE) {
+          print('gb = alignMemory(getMemory({{{ STATIC_BUMP }}} + ' + MAX_GLOBAL_ALIGN + '), ' + MAX_GLOBAL_ALIGN + ' || 1);\n');
+          // The static area consists of explicitly initialized data, followed by zero-initialized data.
+          // The latter may need zeroing out if the MAIN_MODULE has already used this memory area before
+          // dlopen'ing the SIDE_MODULE.  Since we don't know the size of the explicitly initialized data
+          // here, we just zero the whole thing, which is suboptimal, but should at least resolve bugs
+          // from uninitialized memory.
+          print('for (var i = gb; i < gb + {{{ STATIC_BUMP }}}; ++i) HEAP8[i] = 0;\n');
+        }
+        // emit "metadata" in a comment. FIXME make this nicer
+        print('// STATICTOP = STATIC_BASE + ' + Runtime.alignMemory(Variables.nextIndexedOffset) + ';\n');
+      }
+      var generated = itemsDict.function.concat(itemsDict.type).concat(itemsDict.GlobalVariableStub).concat(itemsDict.GlobalVariable);
+      print(generated.map(function(item) { return item.JS; }).join('\n'));
+
+      if (memoryInitialization.length > 0) {
+        // apply postsets directly into the big memory initialization
+        itemsDict.GlobalVariablePostSet = itemsDict.GlobalVariablePostSet.filter(function(item) {
+          var m;
+          if (m = /^HEAP([\dFU]+)\[([()>\d]+)\] *= *([()|\d{}\w_' ]+);?$/.exec(item.JS)) {
+            var type = getTypeFromHeap(m[1]);
+            var bytes = Runtime.getNativeTypeSize(type);
+            var target = eval(m[2]) << log2(bytes);
+            var value = m[3];
+            try {
+              value = eval(value);
+            } catch(e) {
+              // possibly function table {{{ FT_* }}} etc.
+              if (value.indexOf('{{ ') < 0) return true;
+            }
+            writeInt8s(memoryInitialization, target - Runtime.GLOBAL_BASE, value, type);
+            return false;
+          }
+          return true;
+        });
+        // write out the singleton big memory initialization value
+        if (USE_PTHREADS) {
+          print('if (!ENVIRONMENT_IS_PTHREAD) {') // Pthreads should not initialize memory again, since it's shared with the main thread.
+        }
+        print('/* memory initializer */ ' + makePointer(memoryInitialization, null, 'ALLOC_NONE', 'i8', 'GLOBAL_BASE' + (SIDE_MODULE ? '+H_BASE' : ''), true));
+        if (USE_PTHREADS) {
+          print('}')
+        }
+      } else {
+        print('/* no memory initializer */'); // test purposes
+      }
+
+      if (!SIDE_MODULE && !WASM_BACKEND) {
+        if (USE_PTHREADS) {
+          print('// Pthreads fill their tempDoublePtr memory area into the pthread stack when the thread is run.')
+          // Main thread still statically allocate tempDoublePtr - although it could theorerically also use its stack
+          // (that might allow removing the whole tempDoublePtr variable altogether from the codebase? but would need
+          // more refactoring)
+          print('var tempDoublePtr = ENVIRONMENT_IS_PTHREAD ? 0 : ' + makeStaticAlloc(8) + ';');
+        } else {
+          print('var tempDoublePtr = ' + makeStaticAlloc(8) + ';');
+        }
+        print('\nfunction copyTempFloat(ptr) { // functions, because inlining this code increases code size too much');
+        print('  HEAP8[tempDoublePtr] = HEAP8[ptr];');
+        print('  HEAP8[tempDoublePtr+1] = HEAP8[ptr+1];');
+        print('  HEAP8[tempDoublePtr+2] = HEAP8[ptr+2];');
+        print('  HEAP8[tempDoublePtr+3] = HEAP8[ptr+3];');
+        print('}\n');
+        print('function copyTempDouble(ptr) {');
+        print('  HEAP8[tempDoublePtr] = HEAP8[ptr];');
+        print('  HEAP8[tempDoublePtr+1] = HEAP8[ptr+1];');
+        print('  HEAP8[tempDoublePtr+2] = HEAP8[ptr+2];');
+        print('  HEAP8[tempDoublePtr+3] = HEAP8[ptr+3];');
+        print('  HEAP8[tempDoublePtr+4] = HEAP8[ptr+4];');
+        print('  HEAP8[tempDoublePtr+5] = HEAP8[ptr+5];');
+        print('  HEAP8[tempDoublePtr+6] = HEAP8[ptr+6];');
+        print('  HEAP8[tempDoublePtr+7] = HEAP8[ptr+7];');
+        print('}\n');
+      }
+      print('// {{PRE_LIBRARY}}\n'); // safe to put stuff here that statically allocates
+
+      return;
+    }
+
+    var shellFile = SHELL_FILE ? SHELL_FILE : (SIDE_MODULE ? 'shell_sharedlib.js' : (MINIMAL_RUNTIME ? 'shell_minimal.js' : 'shell.js'));
+
+    var shellParts = read(shellFile).split('{{BODY}}');
+    print(processMacros(preprocess(shellParts[0], shellFile)));
+    var pre;
+    if (SIDE_MODULE) {
+      pre = processMacros(preprocess(read('preamble_sharedlib.js'), 'preamble_sharedlib.js'));
+    } else if (MINIMAL_RUNTIME) {
+      pre = processMacros(preprocess(read('preamble_minimal.js'), 'preamble_minimal.js'));
+    } else {
+      pre = processMacros(preprocess(read('support.js'), 'support.js')) +
+            processMacros(preprocess(read('preamble.js'), 'preamble.js'));
+    }
+    print(pre);
+
+    // Print out global variables and postsets TODO: batching
+    var legalizedI64sDefault = legalizedI64s;
+    legalizedI64s = false;
+
+    var globalsData = {functionStubs: []}
+    JSify(globalsData, true);
+    globalsData = null;
+
+    var generated = itemsDict.functionStub.concat(itemsDict.GlobalVariablePostSet);
+    generated.forEach(function(item) { print(indentify(item.JS || '', 2)); });
+
+    legalizedI64s = legalizedI64sDefault;
+
+    if (!SIDE_MODULE) {
+      if (USE_PTHREADS) {
+        print('\n // proxiedFunctionTable specifies the list of functions that can be called either synchronously or asynchronously from other threads in postMessage()d or internally queued events. This way a pthread in a Worker can synchronously access e.g. the DOM on the main thread.')
+        print('\nvar proxiedFunctionTable = [' + proxiedFunctionTable.join() + '];\n');
+      }
+    }
+
+    if (!MINIMAL_RUNTIME) {
+      print('var ASSERTIONS = ' + !!ASSERTIONS + ';\n');
+
+      print(preprocess(read('arrayUtils.js')));
+    }
+
+    if (SUPPORT_BASE64_EMBEDDING && !MINIMAL_RUNTIME) {
+      print(preprocess(read('base64Utils.js')));
+    }
+
+    var usedExternPrimitiveNames = Object.keys(usedExternPrimitives);
+    if (usedExternPrimitiveNames.length > 0) {
+      print('// ASM_LIBRARY EXTERN PRIMITIVES: ' + usedExternPrimitiveNames.join(',') + '\n');
+    }
+
+    if (asmLibraryFunctions.length > 0) {
+      print('// ASM_LIBRARY FUNCTIONS');
+      function fix(f) { // fix indenting to not confuse js optimizer
+        f = f.substr(f.indexOf('f')); // remove initial spaces before 'function'
+        f = f.substr(0, f.lastIndexOf('\n')+1); // remove spaces and last }  XXX assumes function has multiple lines
+        return f + '}'; // add unindented } to match function
+      }
+      print(asmLibraryFunctions.map(fix).join('\n'));
+    }
+
+    if (abortExecution) throw Error('Aborting compilation due to previous errors');
+
+    // This is the main 'post' pass. Print out the generated code that we have here, together with the
+    // rest of the output that we started to print out earlier (see comment on the
+    // "Final shape that will be created").
+    print('// EMSCRIPTEN_END_FUNCS\n');
+
+    if (HEADLESS) {
+      print('if (!ENVIRONMENT_IS_WEB) {');
+      print(read('headlessCanvas.js'));
+      print('\n');
+      print(read('headless.js').replace("'%s'", "'http://emscripten.org'").replace("'?%s'", "''").replace("'?%s'", "'/'").replace('%s,', 'null,').replace('%d', '0'));
+      print('}');
+    }
+    if (PROXY_TO_WORKER) {
+      print('if (ENVIRONMENT_IS_WORKER) {\n');
+      print(read('webGLWorker.js'));
+      print(processMacros(preprocess(read('proxyWorker.js'), 'proxyWorker.js')));
+      print('}');
+    }
+    if (DETERMINISTIC) {
+      print(read('deterministic.js'));
+    }
+
+    var postFile = SIDE_MODULE ? 'postamble_sharedlib.js' : (MINIMAL_RUNTIME ? 'postamble_minimal.js' : 'postamble.js');
+    var postParts = processMacros(preprocess(read(postFile), postFile)).split('{{GLOBAL_VARS}}');
+    print(postParts[0]);
+
+    print(postParts[1]);
+
+    var shellParts = read(shellFile).split('{{BODY}}');
+    print(processMacros(preprocess(shellParts[1], shellFile)));
+    // Print out some useful metadata
+    if (RUNNING_JS_OPTS) {
+      var generatedFunctions = JSON.stringify(keys(Functions.implementedFunctions));
+      if (RUNNING_JS_OPTS) {
+        print('// EMSCRIPTEN_GENERATED_FUNCTIONS: ' + generatedFunctions + '\n');
+      }
+    }
+
+    PassManager.serialize();
   }
 
   // Data
 
-  substrate.addItems(values(Types.types).filter(function(type) { return type.lineNum != '?' }), 'Type');
-  substrate.addItems(values(data.globalVariables), 'GlobalVariable');
-  substrate.addItems(data.functions, 'FunctionSplitter');
-  substrate.addItems(data.functionStubs, 'FunctionStub');
-  substrate.addItems(data.aliass, 'Alias');
+  if (mainPass) {
+    data.functionStubs.forEach(functionStubHandler);
+  }
 
-  return finalCombiner(substrate.solve());
+  finalCombiner();
 }
-

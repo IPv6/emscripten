@@ -1,6 +1,12 @@
+// Copyright 2011 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 int main()
 {
@@ -28,11 +34,25 @@ int main()
   fclose (file);
   free (buffer);
 
+  // Do it again, with a loop on feof
+
+  printf("loop: ");
+  file = fopen("somefile.binary", "rb");
+  assert(file);
+  while (!feof(file)) {
+    char c = fgetc(file);
+    if (c != EOF) printf("%d ", c);
+  }
+  fclose (file);
+  printf("\n");
+
   // Standard streams
 
   printf("input:%s\n", gets((char*)malloc(1024)));
   fwrite("texto\n", 1, 6, stdout);
   fwrite("texte\n", 1, 6, stderr);
+  putchar('$');
+  putc('\n', stdout);
 
   // Writing
 
@@ -40,6 +60,9 @@ int main()
   FILE *outf = fopen("go.out", "wb");
   fwrite(data, 1, 5, outf);
   fclose(outf);
+
+  FILE *devNull = fopen("/dev/null", "rb");
+  assert(devNull);
 
   char data2[10];
   FILE *inf = fopen("go.out", "rb");
@@ -88,6 +111,38 @@ int main()
   num = fscanf(inf, "%d %s", &number, text);
   fclose(inf);
   printf("fscanfed: %d - %s\n", number, text);
+
+  // temp files
+  const char *tname = "file_XXXXXX";
+  char tname1[100];
+  char tname2[100];
+  strcpy(tname1, tname);
+  strcpy(tname2, tname);
+  assert(!strcmp(tname1, tname2)); // equal
+  int f1 = mkstemp(tname1);
+  int f2 = mkstemp(tname2);
+  assert(f1 != f2);
+  //printf("%d,%d,%s,%s\n", f1, f2, tname1, tname2);
+  assert(strcmp(tname1, tname2)); // not equal
+  assert(fopen(tname1, "r"));
+  assert(fopen(tname2, "r"));
+  assert(!fopen(tname2+1, "r")); // sanity check that we can't open just anything
+
+  {
+    FILE* f = tmpfile();
+    assert(f);
+    fclose(f);
+
+    char* str = tmpnam(NULL);
+    //printf("temp: %s\n", str);
+    assert(strncmp("/tmp/", str, 5) == 0);
+  }
+
+  FILE *n = fopen("/dev/null", "w");
+  printf("5 bytes to dev/null: %zu\n", fwrite(data, 1, 5, n));
+  fclose(n);
+
+  printf("ok.\n");
 
   return 0;
 }

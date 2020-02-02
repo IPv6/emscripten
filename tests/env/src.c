@@ -1,10 +1,17 @@
+/*
+ * Copyright 2011 The Emscripten Authors.  All rights reserved.
+ * Emscripten is available under two separate licenses, the MIT license and the
+ * University of Illinois/NCSA Open Source License.  Both these licenses can be
+ * found in the LICENSE file.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 int main() {
   printf("List:\n");
-  for (char** str = __environ; *str; str++) {
+  for (char** str = environ; *str; str++) {
     printf("%s\n", *str);
   }
   printf("\n");
@@ -25,7 +32,6 @@ int main() {
   char buffer[] = "PUT_VALUE=test5";
   printf("putenv(PUT_VALUE) ret: %d\n", putenv(buffer));
   printf("getenv(PUT_VALUE): %s\n", getenv("PUT_VALUE"));
-  // NOTE: This should change the value. In our implementation, it doesn't.
   buffer[10] = 'Q';
   printf("getenv(PUT_VALUE) after alteration: %s\n", getenv("PUT_VALUE"));
 
@@ -35,7 +41,6 @@ int main() {
   printf("setenv(0) ret: %d\n", setenv(0, "foo", 1));
   printf("setenv('') ret: %d\n", setenv("", "foo", 1));
   printf("setenv(X=Y) ret: %d\n", setenv("X=Y", "foo", 1));
-  printf("unsetenv(0) ret: %d\n", unsetenv(0));
   printf("unsetenv('') ret: %d\n", unsetenv(""));
   printf("unsetenv(X=Y) ret: %d\n", unsetenv("X=Y"));
 

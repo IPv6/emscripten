@@ -1,31 +1,36 @@
-FS.createFolder('/', 'forbidden', false, false);
-FS.createFolder('/forbidden', 'test', true, true);
-FS.createPath('/', 'abc/123', true, true);
-FS.createPath('/', 'abc/456', true, true);
-FS.createPath('/', 'def/789', true, true);
-FS.createDevice('/abc', 'deviceA', function() {}, function() {});
-FS.createDevice('/def', 'deviceB', function() {}, function() {});
-FS.createLink('/abc', 'localLink', '123', true, true);
-FS.createLink('/abc', 'rootLink', '/', true, true);
-FS.createLink('/abc', 'relativeLink', '../def', true, true);
+var dummy_device = FS.makedev(64, 0);
+FS.registerDevice(dummy_device, {});
+
+FS.mkdir('/forbidden', 0000);
+FS.mkdir('/forbidden/test');
+FS.mkdir('/abc');
+FS.mkdir('/abc/123');
+FS.mkdir('/abc/456');
+FS.mkdir('/def');
+FS.mkdir('/def/789');
+FS.mkdev('/abc/deviceA', dummy_device);
+FS.mkdev('/def/deviceB', dummy_device);
+FS.symlink('123', '/abc/localLink');
+FS.symlink('/', '/abc/rootLink');
+FS.symlink('../def', '/abc/relativeLink');
+FS.ignorePermissions = false;
 
 function explore(path) {
-  print(path);
+  out(path);
   var ret = FS.analyzePath(path);
-  print('  isRoot: ' + ret.isRoot);
-  print('  exists: ' + ret.exists);
-  print('  error: ' + ret.error);
-  print('  path: ' + ret.path);
-  print('  name: ' + ret.name);
-  print('  object.contents: ' + (ret.object && JSON.stringify(Object.keys(ret.object.contents || {}))));
-  print('  parentExists: ' + ret.parentExists);
-  print('  parentPath: ' + ret.parentPath);
-  print('  parentObject.contents: ' + (ret.parentObject && JSON.stringify(Object.keys(ret.parentObject.contents))));
-  print('');
+  out('  isRoot: ' + ret.isRoot);
+  out('  exists: ' + ret.exists);
+  out('  error: ' + ret.error);
+  out('  path: ' + ret.path);
+  out('  name: ' + ret.name);
+  out('  object.contents: ' + (ret.object && JSON.stringify(Object.keys(ret.object.contents || {}))));
+  out('  parentExists: ' + ret.parentExists);
+  out('  parentPath: ' + ret.parentPath);
+  out('  parentObject.contents: ' + (ret.parentObject && JSON.stringify(Object.keys(ret.parentObject.contents))));
+  out('');
 }
 
 FS.currentPath = '/abc';
-explore('');
 explore('/');
 explore('.');
 explore('..');

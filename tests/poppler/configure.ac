@@ -269,25 +269,27 @@ dnl Check for freetype headers
 FREETYPE_LIBS=
 FREETYPE_CFLAGS=
 
-PKG_CHECK_MODULES(FREETYPE, freetype2,
-                  [freetype_pkgconfig=yes], [freetype_pkgconfig=no])
-
-if test "x$freetype_pkgconfig" = "xyes"; then
-
-  AC_DEFINE(HAVE_FREETYPE_H, 1, [Have FreeType2 include files])
-
-else
-
-  AC_PATH_PROG(FREETYPE_CONFIG, freetype-config, no)
-  if test "x$FREETYPE_CONFIG" != "xno" ; then
-
-    FREETYPE_CFLAGS=`$FREETYPE_CONFIG --cflags`
-    FREETYPE_LIBS=`$FREETYPE_CONFIG --libs`
-    AC_DEFINE(HAVE_FREETYPE_H, 1, [Have FreeType2 include files])
-
-  fi
-
-fi
+# XXX EMSCRIPTEN: Force freetype detection
+AC_DEFINE(HAVE_FREETYPE_H, 1, [Have FreeType2 include files])
+#PKG_CHECK_MODULES(FREETYPE, freetype2,
+#                  [freetype_pkgconfig=yes], [freetype_pkgconfig=no])
+#
+#if test "x$freetype_pkgconfig" = "xyes"; then
+#
+#  AC_DEFINE(HAVE_FREETYPE_H, 1, [Have FreeType2 include files])
+#
+#else
+#
+#  AC_PATH_PROG(FREETYPE_CONFIG, freetype-config, no)
+#  if test "x$FREETYPE_CONFIG" != "xno" ; then
+#
+#    FREETYPE_CFLAGS=`$FREETYPE_CONFIG --cflags`
+#    FREETYPE_LIBS=`$FREETYPE_CONFIG --libs`
+#    AC_DEFINE(HAVE_FREETYPE_H, 1, [Have FreeType2 include files])
+#
+#  fi
+#
+#fi
 
 AC_SUBST(FREETYPE_CFLAGS)
 AC_SUBST(FREETYPE_LIBS)
@@ -608,12 +610,12 @@ if test "x$GCC" != xyes; then
 fi
 case "$enable_compile_warnings" in
   no)	;;
-  yes)	CXXFLAGS="-Wall -Wno-write-strings -Woverloaded-virtual -Wnon-virtual-dtor -Wcast-align -fno-exceptions -fno-check-new -fno-common $CXXFLAGS" ;;
+  yes)	CXXFLAGS="-Wall -Wno-write-strings -Woverloaded-virtual -Wnon-virtual-dtor -Wcast-align -fno-exceptions -fno-common $CXXFLAGS" ;;
   kde)	CXXFLAGS="-Wnon-virtual-dtor -Wno-long-long -Wundef \
 		-D_XOPEN_SOURCE=600 -D_BSD_SOURCE -Wcast-align \
 		-Wconversion -Wall -W -Wpointer-arith \
 		-Wwrite-strings -O2 -Wformat-security \
-		-Wmissing-format-attribute -fno-exceptions -fno-check-new \
+		-Wmissing-format-attribute -fno-exceptions \
 		-fno-common $CXXFLAGS" ;;
 esac
 

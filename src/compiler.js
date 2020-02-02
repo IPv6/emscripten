@@ -1,3 +1,10 @@
+// Copyright 2010 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
+//"use strict";
+
 // LLVM => JavaScript compiler, main entry point
 
 try {
@@ -5,15 +12,129 @@ try {
   gcparam('maxBytes', 1024*1024*1024);
 } catch(e) {}
 
-// Prep - allow this to run in both SpiderMonkey and V8
-if (!this['load']) {
-  load = function(f) { eval(snarf(f)) };
+
+// The environment setup code appears here, in js_optimizer.js and in tests/hello_world.js because it can't be shared. Keep them in sync!
+// It also appears, in modified form, in shell.js.
+// *** Environment setup code ***
+var arguments_ = [];
+
+var ENVIRONMENT_IS_WEB = typeof window === 'object';
+var ENVIRONMENT_IS_WORKER = typeof importScripts === 'function';
+var ENVIRONMENT_IS_NODE = typeof process === 'object' && typeof require === 'function' && !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_WORKER;
+var ENVIRONMENT_IS_SHELL = !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_NODE && !ENVIRONMENT_IS_WORKER;
+
+if (ENVIRONMENT_IS_NODE) {
+  // Expose functionality in the same simple way that the shells work
+  // Note that we pollute the global namespace here, otherwise we break in node
+  print = function(x) {
+    process['stdout'].write(x + '\n');
+  };
+  printErr = function(x) {
+    process['stderr'].write(x + '\n');
+  };
+
+  var nodeFS = require('fs');
+  var nodePath = require('path');
+
+  if (!nodeFS.existsSync) {
+    nodeFS.existsSync = function(path) {
+      try {
+        return !!nodeFS.readFileSync(path);
+      } catch(e) {
+        return false;
+      }
+    }
+  }
+
+  function find(filename) {
+    var prefixes = [__dirname, process.cwd()];
+    for (var i = 0; i < prefixes.length; ++i) {
+      var combined = nodePath.join(prefixes[i], filename);
+      if (nodeFS.existsSync(combined)) {
+        return combined;
+      }
+    }
+    return filename;
+  }
+
+  read = function(filename) {
+    var absolute = find(filename);
+    return nodeFS['readFileSync'](absolute).toString();
+  };
+
+  load = function(f) {
+    globalEval(read(f));
+  };
+
+  arguments_ = process['argv'].slice(2);
+
+} else if (ENVIRONMENT_IS_SHELL) {
+  // Polyfill over SpiderMonkey/V8 differences
+  if (!this['read']) {
+    this['read'] = function(f) { snarf(f) };
+  }
+
+  if (typeof scriptArgs != 'undefined') {
+    arguments_ = scriptArgs;
+  } else if (typeof arguments != 'undefined') {
+    arguments_ = arguments;
+  }
+
+} else if (ENVIRONMENT_IS_WEB) {
+  printErr = function(x) {
+    console.log(x);
+  };
+
+  if (!this['print']) this['print'] = printErr;
+
+  this['read'] = function(url) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', url, false);
+    xhr.send(null);
+    return xhr.responseText;
+  };
+
+  if (this['arguments']) {
+    arguments_ = arguments;
+  }
+} else if (ENVIRONMENT_IS_WORKER) {
+  // We can do very little here...
+
+  this['load'] = importScripts;
+
+} else {
+  throw 'Unknown runtime environment. Where are we?';
 }
-if (!this['read']) {
-  read = function(f) { snarf(f) };
+
+function globalEval(x) {
+  eval.call(null, x);
 }
-if (!this['arguments']) {
-  arguments = scriptArgs;
+
+if (typeof load == 'undefined' && typeof read != 'undefined') {
+  this['load'] = function(f) {
+    globalEval(read(f));
+  };
+}
+
+if (typeof printErr === 'undefined') {
+  this['printErr'] = function(){};
+}
+
+if (typeof print === 'undefined') {
+  this['print'] = printErr;
+}
+// *** Environment setup code ***
+
+
+DEBUG_MEMORY = false;
+
+// Polyfilling
+
+if (!String.prototype.startsWith) {
+  String.prototype.startsWith = function(searchString, position) {
+    position = position || 0;
+    return this.indexOf(searchString, position) === position;
+  };
 }
 
 // Basic utilities
@@ -23,61 +144,125 @@ load('utility.js');
 // Load settings, can be overridden by commandline
 
 load('settings.js');
+load('settings_internal.js');
 
-var settings_file = arguments[0];
-var ll_file = arguments[1];
+var settings_file = arguments_[0];
 
-var settings = JSON.parse(read(settings_file));
-for (setting in settings) {
-  this[setting] = settings[setting];
+if (settings_file) {
+  var settings = JSON.parse(read(settings_file));
+  for (key in settings) {
+    var value = settings[key];
+    if (value[0] == '@') {
+      // response file type thing, workaround for large inputs: value is @path-to-file
+      try {
+        value = JSON.parse(read(value.substr(1)));
+      } catch(e) {
+        // continue normally; assume it is not a response file
+      }
+    }
+    eval(key + ' = ' + JSON.stringify(value));
+  }
 }
 
-var CONSTANTS = { 'QUANTUM_SIZE': QUANTUM_SIZE };
-
-if (CORRECT_SIGNS >= 2) {
-  CORRECT_SIGNS_LINES = set(CORRECT_SIGNS_LINES); // for fast checking
-}
-if (CORRECT_OVERFLOWS >= 2) {
-  CORRECT_OVERFLOWS_LINES = set(CORRECT_OVERFLOWS_LINES); // for fast checking
-}
-if (CORRECT_ROUNDINGS >= 2) {
-  CORRECT_ROUNDINGS_LINES = set(CORRECT_ROUNDINGS_LINES); // for fast checking
-}
-if (SAFE_HEAP >= 2) {
-  SAFE_HEAP_LINES = set(SAFE_HEAP_LINES); // for fast checking
-}
 
 EXPORTED_FUNCTIONS = set(EXPORTED_FUNCTIONS);
-EXPORTED_GLOBALS = set(EXPORTED_GLOBALS);
+EXCEPTION_CATCHING_WHITELIST = set(EXCEPTION_CATCHING_WHITELIST);
+IMPLEMENTED_FUNCTIONS = set(IMPLEMENTED_FUNCTIONS);
+INCOMING_MODULE_JS_API = set(INCOMING_MODULE_JS_API);
 
-// Settings sanity checks
+DEAD_FUNCTIONS.forEach(function(dead) {
+  DEFAULT_LIBRARY_FUNCS_TO_INCLUDE.push(dead.substr(1));
+});
+DEAD_FUNCTIONS = numberedSet(DEAD_FUNCTIONS);
 
-assert(!(USE_TYPED_ARRAYS === 2 && QUANTUM_SIZE !== 4), 'For USE_TYPED_ARRAYS == 2, must have normal QUANTUM_SIZE of 4');
+RUNTIME_DEBUG = LIBRARY_DEBUG || GL_DEBUG;
+
+// Output some info and warnings based on settings
+
+if (VERBOSE) printErr('VERBOSE is on, this generates a lot of output and can slow down compilation');
 
 // Load compiler code
 
-load('framework.js');
 load('modules.js');
 load('parseTools.js');
-load('intertyper.js');
-load('analyzer.js');
 load('jsifier.js');
-eval(processMacros(preprocess(read('runtime.js'))));
+globalEval(processMacros(preprocess(read('runtime.js'), 'runtime.js')));
+Runtime.QUANTUM_SIZE = 4;
+
+// State computations
+
+var ENVIRONMENTS = ENVIRONMENT.split(',');
+ENVIRONMENT_MAY_BE_WEB    = !ENVIRONMENT || ENVIRONMENTS.indexOf('web') >= 0;
+ENVIRONMENT_MAY_BE_NODE   = !ENVIRONMENT || ENVIRONMENTS.indexOf('node') >= 0;
+ENVIRONMENT_MAY_BE_SHELL  = !ENVIRONMENT || ENVIRONMENTS.indexOf('shell') >= 0;
+
+// The worker case also includes Node.js workers when pthreads are
+// enabled and Node.js is one of the supported environments for the build to
+// run on. Node.js workers are detected as a combination of
+// ENVIRONMENT_IS_WORKER and ENVIRONMENT_HAS_NODE.
+ENVIRONMENT_MAY_BE_WORKER = !ENVIRONMENT || ENVIRONMENTS.indexOf('worker') >= 0 ||
+                            (ENVIRONMENT_MAY_BE_NODE && USE_PTHREADS);
+
+if (ENVIRONMENT && !(ENVIRONMENT_MAY_BE_WEB || ENVIRONMENT_MAY_BE_WORKER || ENVIRONMENT_MAY_BE_NODE || ENVIRONMENT_MAY_BE_SHELL)) {
+  throw 'Invalid environment specified in "ENVIRONMENT": ' + ENVIRONMENT + '. Should be one of: web, worker, node, shell.';
+}
+
+if (!ENVIRONMENT_MAY_BE_WORKER && PROXY_TO_WORKER) {
+  throw 'If you specify --proxy-to-worker and specify a "-s ENVIRONMENT=" directive, it must include "worker" as a target! (Try e.g. -s ENVIRONMENT=web,worker)';
+}
+
+if (!ENVIRONMENT_MAY_BE_WORKER && USE_PTHREADS) {
+  throw 'When building with multithreading enabled and a "-s ENVIRONMENT=" directive is specified, it must include "worker" as a target! (Try e.g. -s ENVIRONMENT=web,worker)';
+}
 
 //===============================
 // Main
 //===============================
 
-// Read llvm
+B = new Benchmarker();
 
-var raw = read(ll_file);
-if (FAKE_X86_FP80) {
-  raw = raw.replace(/x86_fp80/g, 'double');
+try {
+  var dummyData = {functionStubs: []}
+  JSify(dummyData);
+
+  //dumpInterProf();
+  //printErr('paths (fast, slow): ' + [fastPaths, slowPaths]);
+  B.print('glue');
+
+  if (DEBUG_MEMORY) {
+    print('zzz. last gc: ' + gc());
+    MemoryDebugger.dump();
+    print('zzz. hanging now!');
+    while(1){};
+  }
+} catch(err) {
+  if (err.toString().indexOf('Aborting compilation due to previous errors') != -1) {
+    // Compiler failed on user error, don't print the stacktrace in this case.
+    printErr(err);
+  } else {
+    // Compiler failed on internal compiler error!
+    printErr('Internal compiler error in src/compiler.js!');
+    printErr('Please create a bug report at https://github.com/emscripten-core/emscripten/issues/ with a log of the build and the input files used to run. Exception message: "' + err + '" | ' + err.stack);
+  }
+
+  if (ENVIRONMENT_IS_NODE) {
+    // Work around a node.js bug where stdout buffer is not flushed at process exit:
+    // Instead of process.exit() directly, wait for stdout flush event.
+    // See https://github.com/joyent/node/issues/1669 and https://github.com/emscripten-core/emscripten/issues/2582
+    // Workaround is based on https://github.com/RReverser/acorn/commit/50ab143cecc9ed71a2d66f78b4aec3bb2e9844f6
+    process['stdout']['once']('drain', function () {
+      process['exit'](1);
+    });
+    console.log(' '); // Make sure to print something to force the drain event to occur, in case the stdout buffer was empty.
+    // Work around another node bug where sometimes 'drain' is never fired - make another effort
+    // to emit the exit status, after a significant delay (if node hasn't fired drain by then, give up)
+    setTimeout(function() {
+      process['exit'](1);
+    }, 500);
+  } else throw err;
 }
-var lines = raw.split('\n');
-raw = null;
 
-// Do it
-
-JSify(analyzer(intertyper(lines)));
+//var M = keys(tokenCacheMisses).map(function(m) { return [m, misses[m]] }).sort(function(a, b) { return a[1] - b[1] });
+//printErr(dump(M.slice(M.length-10)));
+//printErr('hits: ' + hits);
 

@@ -525,10 +525,10 @@ int main(argc, argv)
         exit(1);
 
     } else if (strcmp(zlibVersion(), ZLIB_VERSION) != 0) {
-        fprintf(stderr, "warning: different zlib version\n");
+        fprintf(stderr, "warning: different zlib version (%s, %s)\n", zlibVersion(), ZLIB_VERSION);
     }
 
-    printf("zlib version %s = %d, compile flags = %d\n",
+    printf("zlib version %s = %d, compile flags = %lu\n",
             ZLIB_VERSION, ZLIB_VERNUM, zlibCompileFlags());
 
     compr    = (Byte*)calloc((uInt)comprLen, 1);

@@ -1,3 +1,10 @@
+/*
+ * Copyright 2011 The Emscripten Authors.  All rights reserved.
+ * Emscripten is available under two separate licenses, the MIT license and the
+ * University of Illinois/NCSA Open Source License.  Both these licenses can be
+ * found in the LICENSE file.
+ */
+
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
@@ -26,7 +33,7 @@ int main() {
     _PC_SYMLINK_MAX,
     _PC_FILESIZEBITS
   };
-  char* names[] = {
+  const char* names[] = {
     "_PC_LINK_MAX",
     "_PC_MAX_CANON",
     "_PC_MAX_INPUT",

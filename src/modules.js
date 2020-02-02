@@ -1,254 +1,262 @@
+// Copyright 2011 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
+//"use strict";
+
 // Various namespace-like modules
 
-var LLVM_STYLE = null;
+var STACK_ALIGN = 16;
 
-var LLVM = {
-  LINKAGES: set('private', 'linker_private', 'linker_private_weak', 'linker_private_weak_def_auto', 'internal',
-                'available_externally', 'linkonce', 'common', 'weak', 'appending', 'extern_weak', 'linkonce_odr',
-                'weak_odr', 'externally_visible', 'dllimport', 'dllexport', 'unnamed_addr'),
-  VISIBILITIES: set('default', 'hidden', 'protected'),
-  PARAM_ATTR: set('noalias', 'signext', 'zeroext', 'inreg', 'sret', 'nocapture', 'nest'),
-  CALLING_CONVENTIONS: set('ccc', 'fastcc', 'coldcc', 'cc10', 'x86_fastcallcc')
-};
-LLVM.GLOBAL_MODIFIERS = set(keys(LLVM.LINKAGES).concat(['constant', 'global', 'hidden']));
+var Variables = {
+  globals: {},
+  indexedGlobals: {}, // for indexed globals, ident ==> index
+  // Used in calculation of indexed globals
+  nextIndexedOffset: 0,
 
-var Debugging = {
-  processMetadata: function(lines) {
-    var llvmLineToMetadata = {};
-    var metadataToSourceLine = {};
-    var metadataToParentMetadata = {};
-    var metadataToFilename = {};
-
-    var structToMemberMeta = {};
-    var memberMetaToStruct = {};
-    var structMetaToStruct = {};
-    var memberMetaToMembers = {};
-    var metadataToMember = {};
-
-    var form1 = new RegExp(/^  .*, !dbg !(\d+) *$/);
-    var form2 = new RegExp(/^  .*, !dbg !(\d+) *; .*$/);
-    var form3 = new RegExp(/^!(\d+) = metadata !{i32 (\d+), i32 \d+, metadata !(\d+), .*}$/);
-    var form3a = new RegExp(/^!(\d+) = metadata !{i32 \d+, metadata !\d+, i32 \d+, i32 \d+, metadata !(\d+), i32 \d+} ; \[ DW_TAG_lexical_block \]$/);
-    var form3ab = new RegExp(/^!(\d+) = metadata !{i32 \d+, i32 \d+, metadata !(\d+), .*$/);
-    var form3ac = new RegExp(/^!(\d+) = metadata !{i32 \d+, metadata !\d+, metadata !"[^"]+", metadata !(\d+)[^\[]* ; \[ DW_TAG_.*$/);
-    var form3b = new RegExp(/^!(\d+) = metadata !{i32 \d+, metadata !"([^"]+)", metadata !"([^"]+)", metadata !\d+} ; \[ DW_TAG_file_type \]$/);
-    var form3c = new RegExp(/^!(\d+) = metadata !{\w+\d* !?(\d+)[^\d].*$/);
-    var form4 = new RegExp(/^!llvm.dbg.[\w\.]+ = .*$/);
-    var form5 = new RegExp(/^!(\d+) = metadata !{.*$/);
-    var form6 = new RegExp(/^  (tail )?call void \@llvm.dbg.\w+\(metadata .*$/);
-    var formStruct = /^!(\d+) = metadata !\{i32 \d+, metadata !\d+, metadata !"([^"]+)", metadata !\d+, i32 \d+, i64 \d+, [^,]*, [^,]*, [^,]*, [^,]*, metadata !(\d+), .*} ; \[ DW_TAG_(?:structure|class)_type \]$/;
-    var formStructMembers = /^!(\d+) = metadata !\{(.*)\}$/;
-    var formMember = /^!(\d+) = metadata !\{i32 \d+, metadata !\d+, metadata !"([^"]+)", metadata !\d+, i32 \d+, i64 \d+, i64 \d+, i64 \d+, .+?, metadata !(\d+)} ; \[ DW_TAG_member \]$/;
-
-    var debugComment = new RegExp(/; +\[debug line = \d+:\d+\]/);
-
-    var ret = lines.map(function(line, i) {
-      line = line.replace(debugComment, '');
-      var skipLine = false;
-
-      if (form6.exec(line)) return ';';
-
-      var calc = form1.exec(line) || form2.exec(line);
-      if (calc) {
-        llvmLineToMetadata[i+1] = calc[1];
-        return line.replace(', !dbg !' + calc[1], '');
-      }
-      calc = formStruct.exec(line);
-      if (calc && !(calc[2] in structToMemberMeta)) {
-        structMetaToStruct[calc[1]] = calc[2];
-        structToMemberMeta[calc[2]] = calc[3];
-        memberMetaToStruct[calc[3]] = calc[1];
-        skipLine = true;
-      }
-      calc = formStructMembers.exec(line);
-      if (calc) {
-        var children = calc[2].match(/!\d+/g) || [];
-        memberMetaToMembers[calc[1]] = children.map(function(i) {
-          return i.slice(1);
-        });
-        skipLine = true;
-      }
-      calc = formMember.exec(line);
-      if (calc) {
-        metadataToMember[calc[1]] = calc.slice(2);
-        skipLine = true;
-      }
-      calc = form3.exec(line);
-      if (calc) {
-        metadataToSourceLine[calc[1]] = calc[2];
-        metadataToParentMetadata[calc[1]] = calc[3];
-        return ';'; // return an empty line, to keep line numbers of subsequent lines the same
-      }
-      calc = form3a.exec(line) || form3ab.exec(line) || form3ac.exec(line);
-      if (calc) {
-        metadataToParentMetadata[calc[1]] = calc[2];
-        return ';';
-      }
-      calc = form3b.exec(line);
-      if (calc) {
-        metadataToFilename[calc[1]] = /* LLVM 2.8<= : calc[3] + '/' + */ calc[2];
-        return ';';
-      }
-      calc = form3c.exec(line) || form4.exec(line) || form5.exec(line);
-      if (calc) return ';';
-      return skipLine ? ';' : line;
-    }, this);
-
-    /*
-    dprint("ll ==> meta: " + JSON.stringify(llvmLineToMetadata));
-    dprint("meta ==> sline: " + JSON.stringify(metadataToSourceLine));
-    dprint("meta ==> pmeta: " + JSON.stringify(metadataToParentMetadata));
-    dprint("meta ==> fname: " + JSON.stringify(metadataToFilename));
-    */
-
-    this.llvmLineToSourceLine = {};
-    this.llvmLineToSourceFile = {};
-    for (var l in llvmLineToMetadata) {
-      var m = llvmLineToMetadata[l];
-      this.llvmLineToSourceLine[l] = metadataToSourceLine[m];
-      //dprint('starting to recurse metadata for: ' + m);
-      while (!metadataToFilename[m]) {
-        //dprint('recursing metadata, at: ' + m);
-        m = metadataToParentMetadata[m];
-        assert(m, 'Confused as to parent metadata for llvm #' + l + ', metadata !' + m);
-      }
-      this.llvmLineToSourceFile[l] = metadataToFilename[m];
+  resolveAliasToIdent: function(ident) {
+    while (1) {
+      var varData = Variables.globals[ident];
+      if (!(varData && varData.targetIdent)) break;
+      ident = varData.targetIdent; // might need to eval to turn (6) into 6
     }
-
-    // Create struct definitions.
-    // TODO: Account for bitfields.
-    function generateStructDefinition(name) {
-      if (!Types.structMetadata.hasOwnProperty(name)) {
-        var struct = [];
-        var membersMetaId = structToMemberMeta[name];
-        var memberIds = memberMetaToMembers[membersMetaId];
-        for (var i = 0; i < memberIds.length; i++) {
-          var memberId = memberIds[i];
-          if (memberId in metadataToMember) {
-            var member = metadataToMember[memberId];
-            if (member[1] in structMetaToStruct) {
-              var def = generateStructDefinition(structMetaToStruct[member[1]]);
-              var record = {};
-              record[member[0]] = def;
-              struct.push(record);
-            } else {
-              struct.push(member[0]);
-            }
-          }
-        }
-        Types.structMetadata[name] = struct;
-      }
-      return Types.structMetadata[name];
-    }
-    for (var name in structToMemberMeta) {
-      generateStructDefinition(name);
-    }
-
-    this.on = true;
-
-    return ret;
+    return ident;
   },
-
-  clear: function() {
-    this.llvmLineToSourceLine = {};
-    this.llvmLineToSourceFile = {};
-    this.on = false;
-  },
-
-  getComment: function(lineNum) {
-    if (!this.on) return null;
-    return lineNum in this.llvmLineToSourceLine ? ' //@line ' + this.llvmLineToSourceLine[lineNum] + ' "' +
-                                                                this.llvmLineToSourceFile[lineNum] + '"' : '';
-  },
-
-  getIdentifier: function(lineNum) {
-    if (!this.on) return null;
-    if (lineNum === undefined) {
-      lineNum = Framework.currItem.lineNum;
-      assert(lineNum !== undefined);
-    }
-    var approx = false;
-    var sourceFile;
-    while (lineNum >= 0) {
-      var sourceFile = this.llvmLineToSourceFile[lineNum];
-      if (sourceFile) break;
-      lineNum--;
-      approx = true;
-    }
-    if (!sourceFile) return 'UNKNOWN';
-    return sourceFile.split('/').slice(-1)[0] + ':' + (approx ? '~' : '') + this.llvmLineToSourceLine[lineNum];
-  }
 };
 
 var Types = {
   types: {},
-  fatTypes: {}, // With QUANTUM_SIZE=1, we store the full-size type data here
-  flipTypes: function() {
-    var temp = this.fatTypes;
-    this.fatTypes = this.types;
-    this.types = temp;
-  },
-  structMetadata: {},
-
-  // Remove all data not needed during runtime (like line numbers, JS, etc.)
-  cleanForRuntime: function() {
-    values(this.types).forEach(function(type) {
-      delete type.intertype;
-      delete type.name_;
-      delete type.lineNum;
-      delete type.lines;
-      delete type.needsFlattening;
-      delete type.JS;
-    });
-    keys(this.types).forEach(function(longer) {
-      var shorter = longer.replace('%struct.', '').replace('%class.');
-      if (shorter === longer) return;
-      if (shorter in this.types) return;
-      this.types[shorter] = this.types[longer];
-    }, this);
-  },
-
-  needAnalysis: {} // Types noticed during parsing, that need analysis
 };
 
-var Functions = {
-  // The list of function datas which are being processed in the jsifier, currently
-  currFunctions: [],
-
-  indexedFunctions: [0, 0], // Start at a non-0 (even, see below) value
-
-  // Mark a function as needing indexing, and returns the index
-  getIndex: function(ident) {
-    var key = this.indexedFunctions.indexOf(ident);
-    if (key < 0) {
-      key = this.indexedFunctions.length;
-      this.indexedFunctions[key] = ident;
-      this.indexedFunctions[key+1] = 0; // Need to have keys be even numbers, see |polymorph| test
-    }
-    return key.toString();
-  },
-
-  // Generate code for function indexing
-  generateIndexing: function() {
-    var indices = this.indexedFunctions.toString().replace('"', '');
-    if (BUILD_AS_SHARED_LIB) {
-      // Shared libraries reuse the parent's function table.
-      return 'FUNCTION_TABLE = FUNCTION_TABLE.concat([' + indices + ']);';
-    } else {
-      return 'var FUNCTION_TABLE = [' + indices + '];';
-    }
+// Constructs an array ['a0', 'a1', 'a2', ..., 'a(n-1)']
+function genArgSequence(n) {
+  var args = [];
+  for(var i = 0; i < n; ++i) {
+    args.push('a'+i);
   }
+  return args;
+}
+
+var Functions = {
+  // All functions that will be implemented in this file. Maps id to signature
+  implementedFunctions: {},
+  // functions added from the library. value 2 means asmLibraryFunction
+  libraryFunctions: {},
 };
 
 var LibraryManager = {
   library: null,
+  structs: {},
+  loaded: false,
+  libraries: [],
+
+  has: function(name) {
+    return this.libraries.indexOf(name) >= 0;
+  },
 
   load: function() {
-    assert(!this.library);
+    if (this.library) return;
 
-    for (var suffix in set('', '_sdl', '_gl', '_browser')) {
-      eval(processMacros(preprocess(read('library' + suffix + '.js'), CONSTANTS)));
+    // Core system libraries (always linked against)
+    var libraries = [
+      'library.js',
+      'library_formatString.js',
+      'library_path.js',
+      'library_signals.js',
+      'library_syscall.js',
+      'library_html5.js',
+      'library_stack_trace.js',
+      'library_wasi.js'
+    ];
+
+    if (!DISABLE_EXCEPTION_THROWING) {
+      libraries.push('library_exceptions.js');
+    } else {
+      libraries.push('library_exceptions_stub.js');
     }
+
+    if (MINIMAL_RUNTIME) {
+      // Classic runtime brings in string-related functions in the runtime preamble, by including
+      // runtime_strings_extra.js that contain the same contents as library_strings.js does. In
+      // MINIMAL_RUNTIME those string functions are available as JS library functions instead from
+      // library_strings.js, to avoid unconditionally bringing in extra code to the build.
+      libraries.push('library_strings.js');
+    } else {
+      libraries.push('library_browser.js');
+    }
+
+    if (FILESYSTEM) {
+      // Core filesystem libraries (always linked against, unless -s FILESYSTEM=0 is specified)
+      libraries = libraries.concat([
+        'library_fs.js',
+        'library_memfs.js',
+        'library_tty.js',
+        'library_pipefs.js', // ok to include it by default since it's only used if the syscall is used
+        'library_sockfs.js', // ok to include it by default since it's only used if the syscall is used
+      ]);
+
+      if (NODERAWFS) {
+        // NODERAWFS requires NODEFS
+        if (SYSTEM_JS_LIBRARIES.indexOf('library_nodefs.js') < 0) {
+          libraries.push('library_nodefs.js');
+        }
+        libraries.push('library_noderawfs.js');
+      }
+    }
+
+    // Additional JS libraries (without AUTO_JS_LIBRARIES, link to these explicitly via -lxxx.js)
+    if (AUTO_JS_LIBRARIES) {
+      libraries = libraries.concat([
+        'library_webgl.js',
+        'library_openal.js',
+        'library_vr.js',
+        'library_sdl.js',
+        'library_glut.js',
+        'library_xlib.js',
+        'library_egl.js',
+        'library_glfw.js',
+        'library_uuid.js',
+        'library_glew.js',
+        'library_idbstore.js',
+        'library_async.js'
+      ]);
+    } else {
+      if (EMTERPRETIFY_ASYNC || ASYNCIFY) {
+        libraries.push('library_async.js');
+      }
+      if (USE_SDL == 1) {
+        libraries.push('library_sdl.js');
+      }
+      if (USE_SDL == 2) {
+        libraries.push('library_egl.js', 'library_webgl.js');
+      }
+    }
+
+    // Add any explicitly specified system JS libraries to link to, add those to link.
+    libraries = libraries.concat(SYSTEM_JS_LIBRARIES)
+
+    if (LZ4) {
+      libraries.push('library_lz4.js');
+    }
+
+    if (MAX_WEBGL_VERSION >= 2) {
+      libraries.push('library_webgl2.js');
+    }
+
+    if (LEGACY_GL_EMULATION) {
+      libraries.push('library_glemu.js');
+    }
+
+    if (USE_WEBGPU) {
+      libraries.push('library_webgpu.js');
+    }
+
+    if (BOOTSTRAPPING_STRUCT_INFO) libraries = ['library_bootstrap_structInfo.js', 'library_formatString.js'];
+
+    // TODO: deduplicate libraries (not needed for correctness, but avoids unnecessary work)
+
+    // Save the list for has() queries later.
+    this.libraries = libraries;
+
+    for (var i = 0; i < libraries.length; i++) {
+      var filename = libraries[i];
+      var src = read(filename);
+      var processed = undefined;
+      try {
+        processed = processMacros(preprocess(src, filename));
+        eval(processed);
+      } catch(e) {
+        var details = [e, e.lineNumber ? 'line number: ' + e.lineNumber : ''];
+        if (VERBOSE) {
+          details.push((e.stack || "").toString().replace('Object.<anonymous>', filename));
+        }
+        if (processed) {
+          error('failure to execute js library "' + filename + '": ' + details);
+          if (VERBOSE) {
+            error('preprocessed source (you can run a js engine on this to get a clearer error message sometimes):\n=============\n' + processed + '\n=============');
+          } else {
+            error('use -s VERBOSE to see more details')
+          }
+        } else {
+          error('failure to process js library "' + filename + '": ' + details);
+          if (VERBOSE) {
+            error('original source:\n=============\n' + src + '\n=============');
+          } else {
+            error('use -s VERBOSE to see more details')
+          }
+        }
+        throw e;
+      }
+    }
+
+    // apply synonyms. these are typically not speed-sensitive, and doing it this way makes it possible to not include hacks in the compiler
+    // (and makes it simpler to switch between SDL versions, fastcomp and non-fastcomp, etc.).
+    var lib = LibraryManager.library;
+    libloop: for (var x in lib) {
+      if (x.lastIndexOf('__') > 0) continue; // ignore __deps, __*
+      if (lib[x + '__asm']) continue; // ignore asm library functions, those need to be fully optimized
+      if (typeof lib[x] === 'string') {
+        var target = x;
+        while (typeof lib[target] === 'string') {
+          // ignore code and variable assignments, aliases are just simple names
+          if (lib[target].search(/[=({; ]/) >= 0) continue libloop;
+          // ignore trivial pass-throughs to Math.*
+          if (lib[target].indexOf('Math_') == 0) continue libloop;
+          target = lib[target];
+        }
+        if (lib[target + '__asm']) continue; // This is an alias of an asm library function. Also needs to be fully optimized.
+        if (!isNaN(target)) continue; // This is a number, and so cannot be an alias target.
+        if (typeof lib[target] === 'undefined' || typeof lib[target] === 'function') {
+          // If the alias provides a signature, then construct a specific 'function foo(a0, a1, a2) { [return] _target(a0, a1, a2); }' form of forwarding.
+          // Otherwise construct a generic 'function foo() { return _target.apply(null, arguments); }' forwarding.
+          // The benefit of the first form is that Closure is able to fully inline and reason about the function.
+          // Note that the signature is checked on the alias function, not on the target function. That allows aliases to choose individually which form
+          // to use. 
+          if (lib[x + '__sig']) {
+            var argCount = lib[x + '__sig'].length - 1;
+            var ret = lib[x + '__sig'] == 'v' ? '' : 'return ';
+            var args = genArgSequence(argCount).join(',');
+            lib[x] = new Function(args, ret + '_' + target + '(' + args + ');');
+          } else {
+            lib[x] = new Function('return _' + target + '.apply(null, arguments)');
+          }
+          if (!lib[x + '__deps']) lib[x + '__deps'] = [];
+          lib[x + '__deps'].push(target);
+        }
+      }
+    }
+
+    if (WASM_BACKEND) {
+      // all asm.js methods should just be run in JS. We should optimize them eventually into wasm. TODO
+      for (var x in lib) {
+        if (lib[x + '__asm']) {
+          lib[x + '__asm'] = undefined;
+        }
+      }
+    }
+
+    /*
+    // export code for CallHandlers.h
+    printErr('============================');
+    for (var x in this.library) {
+      var y = this.library[x];
+      if (typeof y === 'string' && x.indexOf('__sig') < 0 && x.indexOf('__postset') < 0 && y.indexOf(' ') < 0) {
+        printErr('DEF_REDIRECT_HANDLER(' + x + ', ' + y + ');');
+      }
+    }
+    printErr('============================');
+    for (var x in this.library) {
+      var y = this.library[x];
+      if (typeof y === 'string' && x.indexOf('__sig') < 0 && x.indexOf('__postset') < 0 && y.indexOf(' ') < 0) {
+        printErr('  SETUP_CALL_HANDLER(' + x + ');');
+      }
+    }
+    printErr('============================');
+    // end export code for CallHandlers.h
+    */
+
+    this.loaded = true;
   },
 
   // Given an ident, see if it is an alias for something, and so forth, returning
@@ -263,6 +271,269 @@ var LibraryManager = {
       ret = LibraryManager.library[ret];
     }
     return last;
+  },
+
+  isStubFunction: function(ident) {
+    if (SIDE_MODULE == 1) return false; // cannot eliminate these, as may be implement in the main module and imported by us
+    var libCall = LibraryManager.library[ident.substr(1)];
+    return typeof libCall === 'function' && libCall.toString().replace(/\s/g, '') === 'function(){}'
+                                         && !(ident in Functions.implementedFunctions);
   }
 };
 
+if (!BOOTSTRAPPING_STRUCT_INFO) {
+  // Load struct and define information.
+  var temp = JSON.parse(read(STRUCT_INFO));
+  C_STRUCTS = temp.structs;
+  C_DEFINES = temp.defines;
+} else {
+  C_STRUCTS = {};
+  C_DEFINES = {};
+}
+
+// Safe way to access a C define. We check that we don't add library functions with missing defines.
+function cDefine(key) {
+	if (key in C_DEFINES) return C_DEFINES[key];
+	throw 'Missing C define ' + key + '! If you just added it to struct_info.json, you need to ./emcc --clear-cache';
+}
+
+var EXPORTED_RUNTIME_METHODS_SET = set(EXPORTED_RUNTIME_METHODS.concat(EXTRA_EXPORTED_RUNTIME_METHODS));
+EXPORTED_RUNTIME_METHODS = unset(EXPORTED_RUNTIME_METHODS_SET);
+EXTRA_EXPORTED_RUNTIME_METHODS = [];
+
+function isFSPrefixed(name) {
+  return name.length > 3 && name[0] === 'F' && name[1] === 'S' && name[2] === '_';
+}
+
+// forcing the filesystem exports a few things by default
+function isExportedByForceFilesystem(name) {
+  return name === 'FS_createFolder' ||
+         name === 'FS_createPath' ||
+         name === 'FS_createDataFile' ||
+         name === 'FS_createPreloadedFile' ||
+         name === 'FS_createLazyFile' ||
+         name === 'FS_createLink' ||
+         name === 'FS_createDevice' ||
+         name === 'FS_unlink' ||
+         name === 'getMemory' ||
+         name === 'addRunDependency' ||
+         name === 'removeRunDependency' ||
+         name === 'calledRun';
+}
+
+// export parts of the JS runtime that the user asked for
+function exportRuntime() {
+  // optionally export something.
+  // in ASSERTIONS mode we show a useful error if it is used without
+  // being exported. how we show the message depends on whether it's
+  // a function (almost all of them) or a number.
+  function maybeExport(name, isNumber) {
+    // if requested to be exported, export it
+    if (name in EXPORTED_RUNTIME_METHODS_SET) {
+      var exported = name;
+      // the exported name may differ from the internal name
+      if (isFSPrefixed(exported)) {
+        // this is a filesystem value, FS.x exported as FS_x
+        exported = 'FS.' + exported.substr(3);
+      } else if (exported === 'print') {
+        exported = 'out';
+      } else if (exported === 'printErr') {
+        exported = 'err';
+      }
+      return 'Module["' + name + '"] = ' + exported + ';';
+    }
+    // do not export it. but if ASSERTIONS, emit a
+    // stub with an error, so the user gets a message
+    // if it is used, that they should export it
+    if (ASSERTIONS) {
+      // check if it already exists, to support EXPORT_ALL and other cases
+      // (we could optimize this, but in ASSERTIONS mode code size doesn't
+      // matter anyhow)
+      var extra = '';
+      if (isExportedByForceFilesystem(name)) {
+        extra = '. Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you';
+      }
+      if (!isNumber) {
+        return 'if (!Object.getOwnPropertyDescriptor(Module, "' + name + '")) Module["' + name + '"] = function() { abort("\'' + name + '\' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)' + extra + '") };';
+      } else {
+        return 'if (!Object.getOwnPropertyDescriptor(Module, "' + name + '")) Object.defineProperty(Module, "' + name + '", { configurable: true, get: function() { abort("\'' + name + '\' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)' + extra + '") } });';
+      }
+    }
+    return '';
+  }
+
+  function maybeExportNumber(name) {
+    return maybeExport(name, true);
+  }
+
+  // All possible runtime elements to export
+  var runtimeElements = [
+    'intArrayFromString',
+    'intArrayToString',
+    'ccall',
+    'cwrap',
+    'setValue',
+    'getValue',
+    'allocate',
+    'getMemory',
+    'AsciiToString',
+    'stringToAscii',
+    'UTF8ArrayToString',
+    'UTF8ToString',
+    'stringToUTF8Array',
+    'stringToUTF8',
+    'lengthBytesUTF8',
+    'UTF16ToString',
+    'stringToUTF16',
+    'lengthBytesUTF16',
+    'UTF32ToString',
+    'stringToUTF32',
+    'lengthBytesUTF32',
+    'allocateUTF8',
+    'allocateUTF8OnStack',
+    'stackTrace',
+    'addOnPreRun',
+    'addOnInit',
+    'addOnPreMain',
+    'addOnExit',
+    'addOnPostRun',
+    'writeStringToMemory',
+    'writeArrayToMemory',
+    'writeAsciiToMemory',
+    'addRunDependency',
+    'removeRunDependency',
+    'ENV',
+    'FS',
+    'FS_createFolder',
+    'FS_createPath',
+    'FS_createDataFile',
+    'FS_createPreloadedFile',
+    'FS_createLazyFile',
+    'FS_createLink',
+    'FS_createDevice',
+    'FS_unlink',
+    'GL',
+    'dynamicAlloc',
+    'loadDynamicLibrary',
+    'loadWebAssemblyModule',
+    'getLEB',
+    'getFunctionTables',
+    'alignFunctionTables',
+    'registerFunctions',
+    'addFunction',
+    'removeFunction',
+    'getFuncWrapper',
+    'prettyPrint',
+    'makeBigInt',
+    'dynCall',
+    'getCompilerSetting',
+    'print',
+    'printErr',
+    'getTempRet0',
+    'setTempRet0',
+    'callMain',
+    'abort',
+  ];
+
+  if (!MINIMAL_RUNTIME) {
+    runtimeElements.push('warnOnce');
+    runtimeElements.push('stackSave');
+    runtimeElements.push('stackRestore');
+    runtimeElements.push('stackAlloc');
+    if (USE_PTHREADS) {
+      runtimeElements.push('establishStackSpace');
+    }
+  }
+
+  if (STACK_OVERFLOW_CHECK) {
+    runtimeElements.push('writeStackCookie');
+    runtimeElements.push('checkStackCookie');
+    if (!MINIMAL_RUNTIME) {
+      runtimeElements.push('abortStackOverflow');
+    }
+  }
+
+  if (USE_PTHREADS) {
+    // In pthreads mode, the following functions always need to be exported to
+    // Module for closure compiler, and also for MODULARIZE (so worker.js can
+    // access them).
+    var threadExports = ['PThread', 'ExitStatus', '_pthread_self'];
+    if (WASM) {
+      threadExports.push('wasmMemory');
+    }
+
+    threadExports.forEach(function(x) {
+      EXPORTED_RUNTIME_METHODS_SET[x] = 1;
+      runtimeElements.push(x);
+    });
+  }
+
+  if (SUPPORT_BASE64_EMBEDDING) {
+    runtimeElements.push('intArrayFromBase64');
+    runtimeElements.push('tryParseAsDataURI');
+  }
+  // dynCall_* methods are not hardcoded here, as they
+  // depend on the file being compiled. check for them
+  // and add them.
+  for (var name in EXPORTED_RUNTIME_METHODS_SET) {
+    if (/^dynCall_/.test(name)) {
+      // a specific dynCall; add to the list
+      runtimeElements.push(name);
+    }
+  }
+  var runtimeNumbers = [
+    'ALLOC_NORMAL',
+    'ALLOC_STACK',
+    'ALLOC_DYNAMIC',
+    'ALLOC_NONE',
+    'calledRun',
+  ];
+  if (ASSERTIONS) {
+    // check all exported things exist, warn about typos
+    for (var name in EXPORTED_RUNTIME_METHODS_SET) {
+      if (runtimeElements.indexOf(name) < 0 &&
+          runtimeNumbers.indexOf(name) < 0) {
+        printErr('warning: invalid item (maybe a typo?) in EXPORTED_RUNTIME_METHODS: ' + name);
+      }
+    }
+  }
+  return runtimeElements.map(function(name) {
+    return maybeExport(name);
+  }).join('\n') + runtimeNumbers.map(function(name) {
+    return maybeExportNumber(name);
+  }).join('\n');
+}
+
+var PassManager = {
+  serialize: function() {
+    print('\n//FORWARDED_DATA:' + JSON.stringify({
+      Functions: Functions,
+      EXPORTED_FUNCTIONS: EXPORTED_FUNCTIONS,
+      STATIC_BUMP: STATIC_BUMP, // updated with info from JS
+      DYNAMICTOP_PTR: DYNAMICTOP_PTR,
+      ATINITS: ATINITS.join('\n'),
+      ATMAINS: ATMAINS.join('\n'),
+      ATEXITS: ATEXITS.join('\n'),
+    }));
+  },
+  load: function(json) {
+    var data = JSON.parse(json);
+    for (var i in data.Types) {
+      Types[i] = data.Types[i];
+    }
+    for (var i in data.Variables) {
+      Variables[i] = data.Variables[i];
+    }
+    for (var i in data.Functions) {
+      Functions[i] = data.Functions[i];
+    }
+    EXPORTED_FUNCTIONS = data.EXPORTED_FUNCTIONS;
+    /*
+    print('\n//LOADED_DATA:' + JSON.stringify({
+      Types: Types,
+      Variables: Variables,
+      Functions: Functions
+    }));
+    */
+  }
+};
